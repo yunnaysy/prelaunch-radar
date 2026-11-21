@@ -1,5 +1,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 // Additive hurdle: net reward must beat T-bill plus hours × $25.
+// Modelled depositor drop divides by protocol-wide TVL since the snapshot gives no per-chain split.
+// Farm plans use a snapshot-listed deployment instead of hunting for the cheapest listed chain.
 // v3: additive farm hurdle, held-out residual intervals, editorial dashboard.
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
