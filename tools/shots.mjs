@@ -8,7 +8,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'out');
 const DASH = join(OUT, 'dashboard');
 const SHOTS = join(ROOT, 'screenshots');
-const TMP = '/tmp/radar-v2-shots';
+const TMP = '/tmp/radar-v4-shots';
 mkdirSync(TMP, { recursive: true });
 mkdirSync(SHOTS, { recursive: true });
 
@@ -39,15 +39,18 @@ async function capture(file, hash, ready) {
   await page.waitForFunction(ready, { timeout: 8000 });
   await page.waitForTimeout(250);
   const path = join(SHOTS, file);
-  const low = 300 * 1024, high = 350 * 1024, target = 325 * 1024;
-  let best = { q: 92, size: 0, score: Infinity };
-  for (const q of [70, 75, 80, 84, 88, 90, 92, 94, 96, 98, 100]) {
+  const high = 168 * 1024;
+  let best = { q: 0, size: 0, tmp: null };
+  for (const q of [56, 60, 64, 68, 72, 76, 80, 84, 88, 92]) {
     const tmp = join(TMP, `${q}-${file}`);
     await page.screenshot({ path: tmp, type: 'jpeg', quality: q });
     const size = statSync(tmp).size;
-    const inRange = size >= low && size <= high;
-    const score = inRange ? Math.abs(size - target) : (size < low ? low - size + 100000 : size - high + 100000);
-    if (score < best.score) best = { q, size, score, tmp };
+    if (size <= high && q >= best.q) best = { q, size, tmp };
+  }
+  if (!best.tmp) {
+    const tmp = join(TMP, `fallback-${file}`);
+    await page.screenshot({ path: tmp, type: 'jpeg', quality: 70 });
+    best = { q: 70, size: statSync(tmp).size, tmp };
   }
   copyFileSync(best.tmp, path);
   const size = statSync(path).size;
@@ -67,7 +70,7 @@ async function capture(file, hash, ready) {
   return { size, ticks, errors };
 }
 
-const boardReady = () => window.RADAR && document.querySelectorAll('#board-body tr').length > 0 && document.querySelectorAll('#audit span').length > 0 && document.querySelectorAll('.kpi').length === 3;
+const boardReady = () => window.RADAR && document.querySelectorAll('#board-body tr').length > 0 && document.querySelectorAll('#audit span').length > 0 && document.querySelectorAll('.kpi').length === 6;
 const detailReady = () => window.RADAR && document.getElementById('detail').classList.contains('open') && document.querySelectorAll('.timeline li').length > 0;
 
 const r1 = await capture('1-board.jpg', '#board', boardReady);
@@ -88,10 +91,12 @@ const slug = await (async () => {
 })();
 console.log('detail slug', slug);
 const r2 = await capture('2-detail.jpg', `#p/${slug}`, detailReady);
-const r3 = await capture('3-filtered.jpg', '#filter/farm', boardReady);
+const methodReady = () => window.RADAR && document.querySelectorAll('#method-body .card').length >= 2 && document.querySelector('#view-method:not(.hidden) svg');
+const r3 = await capture('3-filtered.jpg', '#method', methodReady);
 
 await browser.close();
 server.close();
 if (r1.errors.length || r2.errors.length || r3.errors.length || r1.ticks.bad.length || r3.ticks.bad.length) {
   process.exitCode = 1;
 }
+

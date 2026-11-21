@@ -3,6 +3,8 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 // Modelled depositor drop divides by protocol-wide TVL since the snapshot gives no per-chain split.
 // Farm plans use a snapshot-listed deployment instead of hunting for the cheapest listed chain.
 // v3: additive farm hurdle, held-out residual intervals, editorial dashboard.
+// v4 keeps a name-length control out of the size curve even when a small sample flatters it.
+// The integrity strip refits years listed from the snapshot day so implied values match board.json to the dollar.
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-board.ts';

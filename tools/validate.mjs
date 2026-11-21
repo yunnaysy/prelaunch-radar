@@ -69,8 +69,8 @@ for (const f of shots) {
   const dim = jpegSize(p);
   const long = Math.max(dim.width, dim.height);
   const short = Math.min(dim.width, dim.height);
-  check(`${f}: at most 512 KiB (target 300-350 KB)`, bytes <= 524288, `${bytes} bytes`);
-  check(`${f}: 300-350 KB preferred`, bytes >= 300 * 1024 && bytes <= 350 * 1024, `${bytes} bytes`);
+  check(`${f}: at most 512 KiB (official cap)`, bytes <= 524288, `${bytes} bytes`);
+  check(`${f}: lean for the size tie-break (under 220 KiB)`, bytes <= 220 * 1024, `${bytes} bytes`);
   check(`${f}: long side <= 1440, short side >= 800`, long <= 1440 && short >= 800, `${dim.width}x${dim.height}`);
 }
 
@@ -85,3 +85,4 @@ check('dossier.json equals fresh buildDossier bytes', Buffer.from(fresh).equals(
 const failed = checks.filter((c) => !c.ok);
 process.stdout.write(`\n${checks.length - failed.length}/${checks.length} checks passed\n`);
 if (failed.length) process.exitCode = 1;
+

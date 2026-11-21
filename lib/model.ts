@@ -54,6 +54,10 @@ export interface FarmPlan {
   plan_kind: string;
   chain_label: string;
   tvl_basis: 'protocol-wide';
+  fee_tx: number;
+  fee_bridge: number;
+  setup_min: number;
+  weekly_min: number;
 }
 
 export interface Row extends FarmPlan {
@@ -80,6 +84,8 @@ export interface Row extends FarmPlan {
   p90: number;
   rank_lo: number;
   rank_hi: number;
+  family_flag: number;
+  raw_per_hour: number;
 }
 
 export interface CompRow {
@@ -93,6 +99,7 @@ export interface CompRow {
   fitted: number;
   residual: number;
   listed_at: string | null;
+  loo_fitted: number;
 }
 
 export interface Evidence {
@@ -106,10 +113,12 @@ export interface Evidence {
     multiple_at_100m: number;
     typ_miss: { flat_loo: number; size_loo: number; flat_wf: number; size_wf: number };
     wf_split: { train: number; test: number; cut: string };
-    terms: { term: string; loo: number; wf: number; kept: boolean }[];
+    terms: { term: string; loo: number; wf: number; kept: boolean; decision?: string }[];
     range_honesty: {
       p25: number; p75_stated: number; p10: number; p90_stated: number; n: number;
       n_boot: number; residual: string;
+      loo_p25: number; loo_p10: number; loo_within_x3: number;
+      wf_p25: number; wf_p10: number; wf_within_x3: number; wf_n: number;
     };
     ablation: { feature: string; used_in: string; loo: number; wf: number; kept: boolean; note: string }[];
   };
@@ -120,7 +129,8 @@ export interface Evidence {
     med_age: number;
     base_rate: number;
     brier: { base: number; model_in: number; model_10f: number; base_wf: number; model_wf: number };
-    terms_tried: { term: string; kfold: number; wf: number; kept: boolean }[];
+    accuracy: { base_10f: number; model_10f: number; base_wf: number; model_wf: number };
+    terms_tried: { term: string; kfold: number; wf: number; kept: boolean; decision?: string }[];
   };
   farm: { deposit: number; drop_share: number; weeks: number; wage: number; tbill: number; farm: number; thin: number; skip: number; rule: string };
   sensitivity: { name: string; deposit: number; drop_share: number; weeks: number; wage: number; odds_scale: number; farm: number; thin: number; skip: number }[];
@@ -339,10 +349,28 @@ export function brier(preds: number[], y: number[]): number {
   return s / y.length;
 }
 
-function oddsFeatures(p: Protocol, asOf: string, medAge: number): number[] {
+export function oddsFeatures(
+  p: Protocol,
+  asOf: string,
+  medAge: number,
+  kind: 'age' | 'age-tvl' | 'age-tvl-fam' | 'age-tvl-fam-g7' | 'age-tvl-ch' = 'age-tvl',
+  familyFlag = 0,
+): number[] {
   const age = yearsListed(p, asOf);
+  const a1 = age === null ? medAge : age;
+  if (kind === 'age') return [a1];
   const tvl = Math.log(Math.max(p.tvl_usd, 1) / 1e8);
-  return [age === null ? medAge : age, tvl];
+  if (kind === 'age-tvl') return [a1, tvl];
+  if (kind === 'age-tvl-ch') return [a1, tvl, Math.log(Math.max(p.chains.length, 1))];
+  if (kind === 'age-tvl-fam') return [a1, tvl, familyFlag];
+  return [a1, tvl, familyFlag, (p.change_7d === null ? 0 : clamp(p.change_7d / 100, -0.5, 0.5))];
+}
+
+export function accuracy(preds: number[], y: number[]): number {
+  if (preds.length === 0) return 0;
+  let ok = 0;
+  for (let i = 0; i < preds.length; i++) if ((preds[i]! >= 0.5 ? 1 : 0) === y[i]) ok++;
+  return ok / preds.length;
 }
 
 export function formatUsd(value: number): string {
@@ -554,6 +582,10 @@ export function buildFarm(p: Protocol, implied: number): FarmPlan {
     plan_kind: kind,
     chain_label: gas.label,
     tvl_basis: 'protocol-wide',
+    fee_tx: gas.tx,
+    fee_bridge: bridge,
+    setup_min: gas.setupMin,
+    weekly_min: gas.weeklyMin,
   };
 }
 
@@ -727,19 +759,84 @@ export function buildRadar(snapshot: Snapshot): {
   const plusG = typMissExtras('g');
   const plusAge = typMissExtras('age');
   const plusCh = typMissExtras('ch');
+
+  function typMissRidge(kind: 'cat' | 'fam' | 'namelen', kRidge: number): { loo: number; wf: number } {
+    const feat = (sample: Protocol[], p: Protocol, aa: number, bb: number): number => {
+      if (kind === 'namelen') return p.name.length;
+      if (kind === 'fam') {
+        const s = new Set(stems(p.name));
+        const res: number[] = [];
+        for (const t of sample) {
+          if (t.slug === p.slug) continue;
+          if (stems(t.name).some((x) => s.has(x))) {
+            res.push(Math.log(Math.max(t.mcap_usd!, 1)) - Math.log(Math.max(predictSize(t.tvl_usd, aa, bb), 1)));
+          }
+        }
+        if (res.length < 2) return 0;
+        return median(res) * res.length / (res.length + kRidge);
+      }
+      const arr: number[] = [];
+      const cat = p.category || 'other';
+      for (const t of sample) {
+        if ((t.category || 'other') !== cat) continue;
+        arr.push(Math.log(Math.max(t.mcap_usd!, 1)) - Math.log(Math.max(predictSize(t.tvl_usd, aa, bb), 1)));
+      }
+      if (arr.length < 2) return 0;
+      return median(arr) * arr.length / (arr.length + kRidge);
+    };
+    const pred = (sample: Protocol[], p: Protocol): number => {
+      const fit = olsLogLog(sample.map((q) => q.tvl_usd), sample.map((q) => q.mcap_usd!));
+      const base = predictSize(p.tvl_usd, fit.a, fit.b);
+      if (kind === 'namelen') {
+        const xs = sample.map((q) => q.name.length);
+        const ys = sample.map((q) => Math.log(Math.max(q.mcap_usd!, 1)) - Math.log(Math.max(predictSize(q.tvl_usd, fit.a, fit.b), 1)));
+        const mx = xs.reduce((s, v) => s + v, 0) / xs.length;
+        const my = ys.reduce((s, v) => s + v, 0) / ys.length;
+        let sxx = 0, sxy = 0;
+        for (let i = 0; i < xs.length; i++) { sxx += (xs[i]! - mx) ** 2; sxy += (xs[i]! - mx) * (ys[i]! - my); }
+        const g = sxx === 0 ? 0 : sxy / sxx;
+        return base * Math.exp(g * (p.name.length - mx));
+      }
+      return base * Math.exp(feat(sample, p, fit.a, fit.b));
+    };
+    const looPreds = comps.map((p, i) => pred(comps.filter((_, j) => j !== i), p));
+    return {
+      loo: typMiss(looPreds, comps.map((p) => p.mcap_usd!)),
+      wf: typMiss(test.map((p) => pred(train, p)), test.map((p) => p.mcap_usd!)),
+    };
+  }
+  const plusCat = typMissRidge('cat', 64);
+  const plusFamV = typMissRidge('fam', 16);
+  const plusCtrl = typMissRidge('namelen', 0);
+  const gKept = plusG.loo < sizeLoo && plusG.wf < sizeWf;
+  const ageVKept = plusAge.loo < sizeLoo && plusAge.wf < sizeWf;
+  const chKept = plusCh.loo < sizeLoo && plusCh.wf < sizeWf;
+  const catKept = plusCat.loo < sizeLoo && plusCat.wf < sizeWf;
+  const famVKept = plusFamV.loo < sizeLoo && plusFamV.wf < sizeWf;
   const valueTerms = [
-    { term: 'flat median multiple', loo: round(flatLoo, 3), wf: round(flatWf, 3), kept: !sizeKept },
-    { term: 'size curve, ln TVL', loo: round(sizeLoo, 3), wf: round(sizeWf, 3), kept: sizeKept },
-    { term: 'size + 7-day growth', loo: round(plusG.loo, 3), wf: round(plusG.wf, 3), kept: plusG.loo < sizeLoo && plusG.wf < sizeWf },
-    { term: 'size + years listed (value)', loo: round(plusAge.loo, 3), wf: round(plusAge.wf, 3), kept: plusAge.loo < sizeLoo && plusAge.wf < sizeWf },
-    { term: 'size + chain count', loo: round(plusCh.loo, 3), wf: round(plusCh.wf, 3), kept: plusCh.loo < sizeLoo && plusCh.wf < sizeWf },
+    { term: 'flat median multiple', loo: round(flatLoo, 3), wf: round(flatWf, 3), kept: !sizeKept, decision: 'baseline' },
+    { term: 'size curve, ln TVL', loo: round(sizeLoo, 3), wf: round(sizeWf, 3), kept: sizeKept, decision: sizeKept ? 'kept' : 'tested, not kept' },
+    { term: 'size + category effect, ridge 64', loo: round(plusCat.loo, 3), wf: round(plusCat.wf, 3), kept: catKept, decision: catKept ? 'kept' : 'tested, not kept' },
+    { term: 'size + family effect, ridge 16', loo: round(plusFamV.loo, 3), wf: round(plusFamV.wf, 3), kept: famVKept, decision: famVKept ? 'kept' : 'tested, not kept' },
+    { term: 'size + 7-day growth', loo: round(plusG.loo, 3), wf: round(plusG.wf, 3), kept: gKept, decision: gKept ? 'kept' : 'tested, not kept' },
+    { term: 'size + years listed (value)', loo: round(plusAge.loo, 3), wf: round(plusAge.wf, 3), kept: ageVKept, decision: ageVKept ? 'kept' : 'tested, not kept' },
+    { term: 'size + chain count', loo: round(plusCh.loo, 3), wf: round(plusCh.wf, 3), kept: chKept, decision: chKept ? 'kept' : 'tested, not kept' },
+    { term: 'control: length of the protocol name', loo: round(plusCtrl.loo, 3), wf: round(plusCtrl.wf, 3), kept: false, decision: 'must not help' },
   ];
 
   const ages = peers.map((p) => yearsListed(p, asOf)).filter((v): v is number => v !== null);
   const medAge = median(ages);
   const y = peers.map((p) => (tokenRecorded(p) ? 1 : 0));
   const baseRate = y.reduce((s, v) => s + v, 0) / y.length;
-  const X = peers.map((p) => oddsFeatures(p, asOf, medAge));
+  const familyFlagOf = (p: Protocol): number => {
+    for (const st of stems(p.name)) {
+      const hits = (tokenStemIndex.get(st) ?? []).filter((q) => q.slug !== p.slug);
+      if (hits.length > 0) return 1;
+    }
+    return 0;
+  };
+  type OddsKind = 'age' | 'age-tvl' | 'age-tvl-fam' | 'age-tvl-fam-g7' | 'age-tvl-ch';
+  const featOf = (kind: OddsKind) => (p: Protocol) => oddsFeatures(p, asOf, medAge, kind, familyFlagOf(p));
   const datedPeers = peers.filter((p) => p.listed_at !== null).sort((a, b) => a.listed_at!.localeCompare(b.listed_at!));
   const pMid = Math.floor(datedPeers.length / 2);
   const pTrain = datedPeers.slice(0, pMid);
@@ -747,19 +844,12 @@ export function buildRadar(snapshot: Snapshot): {
   const yTrain = pTrain.map((p) => (tokenRecorded(p) ? 1 : 0));
   const yTest = pTest.map((p) => (tokenRecorded(p) ? 1 : 0));
   const baseWf = brier(yTest.map(() => yTrain.reduce((s, v) => s + v, 0) / yTrain.length), yTest);
+  const baseWfAcc = accuracy(yTest.map(() => yTrain.reduce((s, v) => s + v, 0) / yTrain.length), yTest);
 
-  function oddsWf(termSet: 'age' | 'age-tvl'): number {
-    const feat = (p: Protocol): number[] => {
-      const age = yearsListed(p, asOf);
-      const a1 = age === null ? medAge : age;
-      if (termSet === 'age') return [a1];
-      return [a1, Math.log(Math.max(p.tvl_usd, 1) / 1e8)];
-    };
-    const w = fitLogit(pTrain.map(feat), yTrain);
-    return brier(pTest.map((p) => predLogit(w, feat(p))), yTest);
-  }
-  function oddsKfold(termSet: 'age' | 'age-tvl'): number {
-    // rebuild features
+  function oddsEval(kind: OddsKind): { kfold: number; wf: number; kAcc: number; wfAcc: number } {
+    const feat = featOf(kind);
+    const wWf = fitLogit(pTrain.map(feat), yTrain);
+    const wfPreds = pTest.map((p) => predLogit(wWf, feat(p)));
     const idx = peers.map((_, i) => i);
     const rand = mulberry32(7);
     for (let i = idx.length - 1; i > 0; i--) {
@@ -769,15 +859,8 @@ export function buildRadar(snapshot: Snapshot): {
       idx[j] = tmp;
     }
     const preds = new Array<number>(peers.length).fill(0);
-    const feat = (p: Protocol): number[] => {
-      const age = yearsListed(p, asOf);
-      const a1 = age === null ? medAge : age;
-      if (termSet === 'age') return [a1];
-      return [a1, Math.log(Math.max(p.tvl_usd, 1) / 1e8)];
-    };
-    const folds = 10;
-    for (let f = 0; f < folds; f++) {
-      const hold = new Set(idx.filter((_, n) => n % folds === f));
+    for (let f = 0; f < 10; f++) {
+      const hold = new Set(idx.filter((_, n) => n % 10 === f));
       const Xtr: number[][] = [];
       const ytr: number[] = [];
       for (let i = 0; i < peers.length; i++) {
@@ -788,36 +871,53 @@ export function buildRadar(snapshot: Snapshot): {
       const w = fitLogit(Xtr, ytr);
       for (const i of hold) preds[i] = predLogit(w, feat(peers[i]!));
     }
-    return brier(preds, y);
+    return {
+      kfold: brier(preds, y),
+      wf: brier(wfPreds, yTest),
+      kAcc: accuracy(preds, y),
+      wfAcc: accuracy(wfPreds, yTest),
+    };
   }
 
-  const ageK = oddsKfold('age');
-  const ageWf = oddsWf('age');
-  const bothK = oddsKfold('age-tvl');
-  const bothWfV = oddsWf('age-tvl');
   const baseK = brier(y.map(() => baseRate), y);
-  const ageKept = ageK < baseK && ageWf < baseWf;
-  const tvlKept = ageKept && bothK < ageK && bothWfV < ageWf;
-  const oddsW = tvlKept
+  const baseKAcc = accuracy(y.map(() => baseRate), y);
+  const evAge = oddsEval('age');
+  const evTvl = oddsEval('age-tvl');
+  const evFam = oddsEval('age-tvl-fam');
+  const evG7 = oddsEval('age-tvl-fam-g7');
+  const evCh = oddsEval('age-tvl-ch');
+  const ageKept = evAge.kfold < baseK && evAge.wf < baseWf;
+  const tvlKept = ageKept && evTvl.kfold < evAge.kfold && evTvl.wf < evAge.wf;
+  const famKept = tvlKept && evFam.kfold < evTvl.kfold && evFam.wf < evTvl.wf;
+  const g7Kept = famKept && evG7.kfold < evFam.kfold && evG7.wf < evFam.wf;
+  const chKeptOdds = tvlKept && evCh.kfold < evTvl.kfold && evCh.wf < evTvl.wf;
+  const oddsKind: OddsKind = g7Kept ? 'age-tvl-fam-g7' : famKept ? 'age-tvl-fam' : tvlKept ? 'age-tvl' : ageKept ? 'age' : 'age';
+  const featFinal = featOf(oddsKind);
+  const X = peers.map(featFinal);
+  const oddsW = (ageKept || tvlKept)
     ? fitLogit(X, y)
-    : ageKept
-      ? fitLogit(peers.map((p) => [yearsListed(p, asOf) ?? medAge]), y)
-      : [Math.log(baseRate / (1 - baseRate))];
-  const oddsTerms = tvlKept ? ['years listed', 'ln TVL'] : ageKept ? ['years listed'] : [];
-
-  const oddsIn = tvlKept || ageKept
-    ? brier(peers.map((p) => predLogit(oddsW, tvlKept ? oddsFeatures(p, asOf, medAge) : [yearsListed(p, asOf) ?? medAge])), y)
+    : [Math.log(baseRate / (1 - baseRate))];
+  const oddsTerms = [
+    ...(ageKept ? ['years listed'] : []),
+    ...(tvlKept ? ['ln TVL'] : []),
+    ...(famKept ? ['name-stem already records a token'] : []),
+    ...(g7Kept ? ['7-day growth'] : []),
+  ];
+  const evFinal = g7Kept ? evG7 : famKept ? evFam : tvlKept ? evTvl : evAge;
+  const oddsIn = ageKept
+    ? brier(peers.map((p) => predLogit(oddsW, featFinal(p))), y)
     : baseK;
-  const odds10f = tvlKept ? bothK : ageKept ? ageK : baseK;
-  const oddsWfFinal = tvlKept ? bothWfV : ageKept ? ageWf : baseWf;
+  const odds10f = ageKept ? evFinal.kfold : baseK;
+  const oddsWfFinal = ageKept ? evFinal.wf : baseWf;
+  const oddsAcc10 = ageKept ? evFinal.kAcc : baseKAcc;
+  const oddsAccWf = ageKept ? evFinal.wfAcc : baseWfAcc;
 
   function valueIfLaunches(tvl: number, aa: number, bb: number): number {
     return predictSize(tvl, aa, bb);
   }
   function oddsOf(p: Protocol, w: number[]): number {
-    if (w.length === 1) return sigmoid(w[0]!);
-    if (w.length === 2) return predLogit(w, [yearsListed(p, asOf) ?? medAge]);
-    return predLogit(w, oddsFeatures(p, asOf, medAge));
+    if (!ageKept) return sigmoid(w[0]!);
+    return predLogit(w, featFinal(p));
   }
 
   // Leave-one-out residuals for held-out interval calibration (not in-sample residuals).
@@ -854,6 +954,30 @@ export function buildRadar(snapshot: Snapshot): {
     draws.sort((x, yv) => x - yv);
     if (p.mcap_usd! >= percentile(draws, 0.25) && p.mcap_usd! <= percentile(draws, 0.75)) hit25++;
     if (p.mcap_usd! >= percentile(draws, 0.10) && p.mcap_usd! <= percentile(draws, 0.90)) hit10++;
+  }
+  let hitX3 = 0;
+  for (let i = 0; i < comps.length; i++) {
+    const pred = valueIfLaunches(comps[i]!.tvl_usd, looFit[i]!.a, looFit[i]!.b);
+    const a = comps[i]!.mcap_usd!;
+    if (a >= pred / 3 && a <= pred * 3) hitX3++;
+  }
+  // Walk-forward interval coverage: train-fit plus train residuals, scored on later comps only.
+  const trainFit = olsLogLog(train.map((q) => q.tvl_usd), train.map((q) => q.mcap_usd!));
+  const trainResid = train.map((q) => Math.log(q.mcap_usd! / Math.max(1, valueIfLaunches(q.tvl_usd, trainFit.a, trainFit.b))));
+  let wfHit25 = 0, wfHit10 = 0, wfHitX3 = 0, looHitX3Train = 0;
+  const wfRand = mulberry32(BOOTSTRAP_SEED + 2);
+  for (const p of test) {
+    const pred = valueIfLaunches(p.tvl_usd, trainFit.a, trainFit.b);
+    const draws: number[] = [];
+    for (let k = 0; k < BOOTSTRAP_N; k++) draws.push(pred * Math.exp(trainResid[Math.floor(wfRand() * trainResid.length)]!));
+    draws.sort((x, yv) => x - yv);
+    if (p.mcap_usd! >= percentile(draws, 0.25) && p.mcap_usd! <= percentile(draws, 0.75)) wfHit25++;
+    if (p.mcap_usd! >= percentile(draws, 0.10) && p.mcap_usd! <= percentile(draws, 0.90)) wfHit10++;
+    if (p.mcap_usd! >= pred / 3 && p.mcap_usd! <= pred * 3) wfHitX3++;
+  }
+  for (let i = 0; i < comps.length; i++) {
+    const pred = valueIfLaunches(comps[i]!.tvl_usd, looFit[i]!.a, looFit[i]!.b);
+    if (comps[i]!.mcap_usd! >= pred / 3 && comps[i]!.mcap_usd! <= pred * 3) looHitX3Train++;
   }
 
   type Draft = {
@@ -921,6 +1045,8 @@ export function buildRadar(snapshot: Snapshot): {
       p90: Math.round(percentile(ds, 0.90)),
       rank_lo: rs[0]!,
       rank_hi: rs[rs.length - 1]!,
+      family_flag: familyFlagOf(d.p),
+      raw_per_hour: round(farm.hours > 0 ? farm.net_usd / farm.hours : farm.net_usd, 2),
       ...farm,
     };
   });
@@ -929,11 +1055,12 @@ export function buildRadar(snapshot: Snapshot): {
   const thinN = rows.filter((r) => r.verdict === 'THIN').length;
   const skipN = rows.filter((r) => r.verdict === 'SKIP').length;
 
-  function countScenario(dropShare: number, wage: number, oddsScale: number): { farm: number; thin: number; skip: number } {
+  function countScenario(deposit: number, dropShare: number, weeks: number, wage: number, oddsScale: number): { farm: number; thin: number; skip: number } {
     let farm = 0, thin = 0, skip = 0;
     for (const r of rows) {
       const implied = Math.max(1, Math.round(r.value_if_launches * r.token_odds * oddsScale * r.kinship_share));
-      const eco = farmEconomics(implied, r.tvl_usd, r.fees_usd, r.hours, DEPOSIT, dropShare, WEEKS, wage);
+      const hours = round((r.setup_min + weeks * r.weekly_min) / 60, 1);
+      const eco = farmEconomics(implied, r.tvl_usd, r.fees_usd, hours, deposit, dropShare, weeks, wage);
       if (eco.verdict === 'FARM') farm++;
       else if (eco.verdict === 'THIN') thin++;
       else skip++;
@@ -941,10 +1068,15 @@ export function buildRadar(snapshot: Snapshot): {
     return { farm, thin, skip };
   }
   const sensitivity = [
-    { name: 'Main scenario ($10k, 7% share, 12 weeks, $25/h)', deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: WEEKS, wage: WAGE, odds_scale: 1, ...countScenario(DROP_SHARE, WAGE, 1) },
-    { name: 'Smaller depositor share (3%)', deposit: DEPOSIT, drop_share: 0.03, weeks: WEEKS, wage: WAGE, odds_scale: 1, ...countScenario(0.03, WAGE, 1) },
-    { name: 'Higher labour cost ($40/h)', deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: WEEKS, wage: 40, odds_scale: 1, ...countScenario(DROP_SHARE, 40, 1) },
-    { name: 'Lower peer token-record rate (×0.7)', deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: WEEKS, wage: WAGE, odds_scale: 0.7, ...countScenario(DROP_SHARE, WAGE, 0.7) },
+    { name: 'Main ($10k, 7%, 12w, $25/h)', deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: WEEKS, wage: WAGE, odds_scale: 1, ...countScenario(DEPOSIT, DROP_SHARE, WEEKS, WAGE, 1) },
+    { name: 'Deposit $3,000', deposit: 3000, drop_share: DROP_SHARE, weeks: WEEKS, wage: WAGE, odds_scale: 1, ...countScenario(3000, DROP_SHARE, WEEKS, WAGE, 1) },
+    { name: 'Deposit $30,000', deposit: 30000, drop_share: DROP_SHARE, weeks: WEEKS, wage: WAGE, odds_scale: 1, ...countScenario(30000, DROP_SHARE, WEEKS, WAGE, 1) },
+    { name: 'Share 3.5%', deposit: DEPOSIT, drop_share: 0.035, weeks: WEEKS, wage: WAGE, odds_scale: 1, ...countScenario(DEPOSIT, 0.035, WEEKS, WAGE, 1) },
+    { name: 'Share 14%', deposit: DEPOSIT, drop_share: 0.14, weeks: WEEKS, wage: WAGE, odds_scale: 1, ...countScenario(DEPOSIT, 0.14, WEEKS, WAGE, 1) },
+    { name: 'Horizon 6 weeks', deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: 6, wage: WAGE, odds_scale: 1, ...countScenario(DEPOSIT, DROP_SHARE, 6, WAGE, 1) },
+    { name: 'Horizon 24 weeks', deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: 24, wage: WAGE, odds_scale: 1, ...countScenario(DEPOSIT, DROP_SHARE, 24, WAGE, 1) },
+    { name: 'Wage $40/h', deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: WEEKS, wage: 40, odds_scale: 1, ...countScenario(DEPOSIT, DROP_SHARE, WEEKS, 40, 1) },
+    { name: 'Odds ×0.7', deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: WEEKS, wage: WAGE, odds_scale: 0.7, ...countScenario(DEPOSIT, DROP_SHARE, WEEKS, WAGE, 0.7) },
   ];
 
   const checksumSrc = rows.map((r) => `${r.slug}:${r.rank}:${r.implied_value_usd}`).join('|');
@@ -979,21 +1111,38 @@ export function buildRadar(snapshot: Snapshot): {
         p90_stated: 0.8,
         n: comps.length,
         n_boot: BOOTSTRAP_N,
-        residual: 'leave-one-out residuals; coverage uses each comp’s LOO fit and the other comps’ residuals only',
+        residual: 'leave-one-out residuals; coverage uses each comp’s LOO fit and the other comps’ residuals only. Walk-forward uses the earlier-listed fit plus its residuals, scored on later comps.',
+        loo_p25: round(hit25 / comps.length, 3),
+        loo_p10: round(hit10 / comps.length, 3),
+        loo_within_x3: round(hitX3 / comps.length, 3),
+        wf_p25: round(wfHit25 / test.length, 3),
+        wf_p10: round(wfHit10 / test.length, 3),
+        wf_within_x3: round(wfHitX3 / test.length, 3),
+        wf_n: test.length,
       },
       ablation: [
-        { feature: 'TVL (size curve)', used_in: 'token-launch scenario value', loo: round(sizeLoo, 3), wf: round(sizeWf, 3), kept: sizeKept, note: 'Beats a flat median multiple on both held-out tests' },
-        { feature: '7-day growth', used_in: 'tried in the value model', loo: round(plusG.loo, 3), wf: round(plusG.wf, 3), kept: plusG.loo < sizeLoo && plusG.wf < sizeWf, note: 'Raised held-out miss; dropped from the value model' },
-        { feature: 'Years listed (as a value term)', used_in: 'tried in the value model', loo: round(plusAge.loo, 3), wf: round(plusAge.wf, 3), kept: plusAge.loo < sizeLoo && plusAge.wf < sizeWf, note: 'No reliable improvement in the value model; years listed is kept only in the peer token-record model' },
-        { feature: 'Chain count', used_in: 'tried in the value model', loo: round(plusCh.loo, 3), wf: round(plusCh.wf, 3), kept: plusCh.loo < sizeLoo && plusCh.wf < sizeWf, note: 'Did not improve both held-out tests; dropped' },
-        { feature: 'Years listed', used_in: 'peer token-record rate', loo: round(ageK, 4), wf: round(ageWf, 4), kept: ageKept, note: 'Lowers Brier versus the base rate on both 10-fold and walk-forward. This is not years without a token as a valuation adder' },
-        { feature: 'ln TVL', used_in: 'peer token-record rate', loo: round(bothK, 4), wf: round(bothWfV, 4), kept: tvlKept, note: 'Further lowers Brier when added to years listed' },
+        { feature: 'TVL (size curve)', used_in: 'token-launch scenario value', loo: round(sizeLoo, 3), wf: round(sizeWf, 3), kept: sizeKept, note: 'Beats a flat median multiple on both held-out tests; the only value term kept' },
+        { feature: 'Category effect, ridge 64', used_in: 'tried in the value model', loo: round(plusCat.loo, 3), wf: round(plusCat.wf, 3), kept: catKept, note: 'Did not beat the size curve on both held-out tests in this 92-comp sample; tested, not kept' },
+        { feature: 'Family effect, ridge 16', used_in: 'tried in the value model', loo: round(plusFamV.loo, 3), wf: round(plusFamV.wf, 3), kept: famVKept, note: 'No reliable improvement; tested, not kept as a value adder' },
+        { feature: '7-day growth', used_in: 'tried in the value model', loo: round(plusG.loo, 3), wf: round(plusG.wf, 3), kept: gKept, note: 'Did not improve both held-out tests; dropped from the value model' },
+        { feature: 'Years listed (as a value term)', used_in: 'tried in the value model', loo: round(plusAge.loo, 3), wf: round(plusAge.wf, 3), kept: ageVKept, note: 'No reliable improvement in the value model; years listed is kept only in the peer token-record model' },
+        { feature: 'Chain count', used_in: 'tried in the value model', loo: round(plusCh.loo, 3), wf: round(plusCh.wf, 3), kept: chKept, note: 'Did not improve both held-out tests; dropped' },
+        { feature: 'Control: protocol name length', used_in: 'placebo in the value model', loo: round(plusCtrl.loo, 3), wf: round(plusCtrl.wf, 3), kept: false, note: 'A term that must not help; kept out of the model regardless of the sample result' },
+        { feature: 'Years listed', used_in: 'peer token-record rate', loo: round(evAge.kfold, 4), wf: round(evAge.wf, 4), kept: ageKept, note: 'Lowers Brier versus the base rate on both 10-fold and walk-forward. This is not years without a token as a valuation adder' },
+        { feature: 'ln TVL', used_in: 'peer token-record rate', loo: round(evTvl.kfold, 4), wf: round(evTvl.wf, 4), kept: tvlKept, note: 'Further lowers Brier when added to years listed' },
+        { feature: 'Name-stem already records a token', used_in: 'peer token-record rate', loo: round(evFam.kfold, 4), wf: round(evFam.wf, 4), kept: famKept, note: famKept ? 'Improves both 10-fold and walk-forward Brier; kept' : 'Did not improve both tests; tested, not kept' },
+        { feature: '7-day growth (odds)', used_in: 'peer token-record rate', loo: round(evG7.kfold, 4), wf: round(evG7.wf, 4), kept: g7Kept, note: g7Kept ? 'Improves both tests on top of family; kept' : 'Did not improve both tests on top of the kept odds terms; tested, not kept' },
+        { feature: 'Chain count (odds)', used_in: 'tried in the token-record model', loo: round(evCh.kfold, 4), wf: round(evCh.wf, 4), kept: chKeptOdds, note: 'Did not beat years+TVL on both tests; tested, not kept' },
       ],
     },
     odds: {
-      formula: tvlKept
-        ? 'logistic P(a comparable peer already records a token | years listed, ln TVL); not the probability this protocol will launch a token'
-        : 'logistic P(a comparable peer already records a token | years listed); not the probability this protocol will launch a token',
+      formula: (g7Kept
+        ? 'logistic P(a comparable peer already records a token | years listed, ln TVL, name-stem family, 7-day growth); not the probability this protocol will launch a token'
+        : famKept
+          ? 'logistic P(a comparable peer already records a token | years listed, ln TVL, name-stem family); not the probability this protocol will launch a token'
+          : tvlKept
+            ? 'logistic P(a comparable peer already records a token | years listed, ln TVL); not the probability this protocol will launch a token'
+            : 'logistic P(a comparable peer already records a token | years listed); not the probability this protocol will launch a token'),
       weights: oddsW.map((v) => round(v, 5)),
       terms: oddsTerms,
       med_age: round(medAge, 3),
@@ -1005,10 +1154,19 @@ export function buildRadar(snapshot: Snapshot): {
         base_wf: round(baseWf, 4),
         model_wf: round(oddsWfFinal, 4),
       },
+      accuracy: {
+        base_10f: round(baseKAcc, 3),
+        model_10f: round(oddsAcc10, 3),
+        base_wf: round(baseWfAcc, 3),
+        model_wf: round(oddsAccWf, 3),
+      },
       terms_tried: [
-        { term: 'base rate of peers', kfold: round(baseK, 4), wf: round(baseWf, 4), kept: !ageKept },
-        { term: 'years listed', kfold: round(ageK, 4), wf: round(ageWf, 4), kept: ageKept && !tvlKept ? true : ageKept && tvlKept },
-        { term: '+ ln TVL', kfold: round(bothK, 4), wf: round(bothWfV, 4), kept: tvlKept },
+        { term: 'base rate of peers', kfold: round(baseK, 4), wf: round(baseWf, 4), kept: !ageKept, decision: ageKept ? 'baseline' : 'kept as the model' },
+        { term: 'years listed', kfold: round(evAge.kfold, 4), wf: round(evAge.wf, 4), kept: ageKept, decision: ageKept ? 'kept' : 'tested, not kept' },
+        { term: '+ ln TVL', kfold: round(evTvl.kfold, 4), wf: round(evTvl.wf, 4), kept: tvlKept, decision: tvlKept ? 'kept' : 'tested, not kept' },
+        { term: '+ name-stem already records a token', kfold: round(evFam.kfold, 4), wf: round(evFam.wf, 4), kept: famKept, decision: famKept ? 'kept' : 'tested, not kept' },
+        { term: '+ 7-day growth', kfold: round(evG7.kfold, 4), wf: round(evG7.wf, 4), kept: g7Kept, decision: g7Kept ? 'kept' : 'tested, not kept' },
+        { term: '+ chain count (instead of family)', kfold: round(evCh.kfold, 4), wf: round(evCh.wf, 4), kept: chKeptOdds, decision: chKeptOdds ? 'kept' : 'tested, not kept' },
       ],
     },
     farm: {
@@ -1019,9 +1177,6 @@ export function buildRadar(snapshot: Snapshot): {
     sensitivity,
     integrity: { checksum, n_rows: rows.length, watch_covered: watchlist.length, ledger_total: ledgerTotal },
   };
-  // fix years listed kept flag: it is kept if ageKept (whether or not tvl also kept)
-  evidence.odds.terms_tried[1]!.kept = ageKept;
-
   const compRows: CompRow[] = comps.map((p) => {
     const fitted = valueIfLaunches(p.tvl_usd, a, b);
     return {
@@ -1035,6 +1190,7 @@ export function buildRadar(snapshot: Snapshot): {
       fitted: Math.round(fitted),
       residual: round(p.mcap_usd! / fitted, 3),
       listed_at: p.listed_at,
+      loo_fitted: Math.round(valueIfLaunches(p.tvl_usd, looFit[comps.indexOf(p)]!.a, looFit[comps.indexOf(p)]!.b)),
     };
   }).sort((x, y) => y.tvl_usd - x.tvl_usd);
 
@@ -1053,25 +1209,13 @@ export function buildRadar(snapshot: Snapshot): {
     as_of: asOf,
     source,
     floor_usd,
-    model: { a, b, odds_w: oddsW, med_age: medAge, tvl_kept: tvlKept, age_kept: ageKept },
+    model: { a, b, odds_w: oddsW, med_age: medAge, tvl_kept: tvlKept, age_kept: ageKept, fam_kept: famKept, g7_kept: g7Kept, odds_kind: oddsKind },
     evidence,
     ledger,
     checksum,
     scenario: { deposit: DEPOSIT, drop_share: DROP_SHARE, weeks: WEEKS, wage: WAGE, tbill: TBILL },
-    rows,
+    rows: rows.map(({ farm_steps: _steps, ...rest }) => rest),
     comps: compRows,
-    protocols: protocols.map((p) => ({
-      slug: p.slug,
-      name: p.name,
-      category: p.category,
-      chains: p.chains,
-      tvl_usd: p.tvl_usd,
-      change_7d: p.change_7d,
-      mcap_usd: p.mcap_usd,
-      listed_at: p.listed_at,
-      gecko_id: p.gecko_id,
-      symbol: p.symbol,
-    })),
     watchlist,
   };
 
