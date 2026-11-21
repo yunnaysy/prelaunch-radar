@@ -7,6 +7,9 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 // The integrity strip refits years listed from the snapshot day so implied values match board.json to the dollar.
 // Protocol name length is a placebo covariate and is never allowed to set the valuation slope.
 // The integrity strip derives ages from the snapshot date itself, preventing a calendar drift between the browser refit and board.json.
+// Moving a farm slider reruns the verdict arithmetic for all 198 protocols in the browser.
+// Any live tweak to deposit, share, or horizon forces the browser to recalculate all 198 farm verdicts.
+// Each slider change recomputes all 198 farm verdicts directly in the dashboard before the table is repainted.
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-board.ts';
