@@ -10,8 +10,10 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 // Moving a farm slider reruns the verdict arithmetic for all 198 protocols in the browser.
 // Any live tweak to deposit, share, or horizon forces the browser to recalculate all 198 farm verdicts.
 // Each slider change recomputes all 198 farm verdicts directly in the dashboard before the table is repainted.
-import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// v5 puts the decision first: four evidence figures, coloured FARM / THIN / SKIP badges and net per hour in every row.
+// The odds evidence now carries how many peers each held-out test scored, so the page can print n beside every Brier score.
+// A raw-net screen sits beside the additive hurdle as a labelled sensitivity, computed from the same 198 records.
+import { dirname, isAbsolute, join, resolve } from 'node:path';import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-board.ts';
 import { boardIssue, buildRadar, parseSnapshot } from './lib/model.ts';
 

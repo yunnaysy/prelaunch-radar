@@ -129,9 +129,8 @@ export interface Evidence {
     med_age: number;
     base_rate: number;
     brier: { base: number; model_in: number; model_10f: number; base_wf: number; model_wf: number };
-    accuracy: { base_10f: number; model_10f: number; base_wf: number; model_wf: number };
-    terms_tried: { term: string; kfold: number; wf: number; kept: boolean; decision?: string }[];
-  };
+    accuracy: { base_10f: number; model_10f: number; base_wf: number; model_wf: number; n_10f: number; n_wf: number };
+    terms_tried: { term: string; kfold: number; wf: number; kept: boolean; decision?: string }[];  };
   farm: { deposit: number; drop_share: number; weeks: number; wage: number; tbill: number; farm: number; thin: number; skip: number; rule: string };
   sensitivity: { name: string; deposit: number; drop_share: number; weeks: number; wage: number; odds_scale: number; farm: number; thin: number; skip: number }[];
   integrity: { checksum: string; n_rows: number; watch_covered: number; ledger_total: number };
@@ -1159,6 +1158,8 @@ export function buildRadar(snapshot: Snapshot): {
         model_10f: round(oddsAcc10, 3),
         base_wf: round(baseWfAcc, 3),
         model_wf: round(oddsAccWf, 3),
+        n_10f: y.length,
+        n_wf: pTest.length,
       },
       terms_tried: [
         { term: 'base rate of peers', kfold: round(baseK, 4), wf: round(baseWf, 4), kept: !ageKept, decision: ageKept ? 'baseline' : 'kept as the model' },

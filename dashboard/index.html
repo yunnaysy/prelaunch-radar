@@ -9,86 +9,89 @@
 <body>
   <div class="app">
     <header class="mast">
-      <div>
-        <p class="kicker" id="kicker">Pre-token protocols, valued from their own record</p>
+      <div class="brand">
+        <p class="eyebrow">Pre-token protocol intelligence</p>
         <h1>Prelaunch Radar</h1>
       </div>
-      <p class="meta" id="meta"></p>
+      <p class="meta"><span id="meta"></span> <button class="status" id="status" type="button" data-goto="method"></button></p>
     </header>
-    <p class="howto" id="howto"></p>
-    <div id="front"><section class="kpis" id="kpis"></section>
-    <section class="acct" id="acct"></section>
-    <section class="audit" id="audit" aria-label="Integrity"></section>
-    <section class="evidence" id="evidence"></section>
-    
-</div>
+    <section class="hero">
+      <div>
+        <p class="headline">Find the protocols worth farming before a token exists.</p>
+        <p class="sub">A data-driven ranking of pre-token protocols, combining estimated token value, token-record odds and farming economics.</p>
+      </div>
+      <div class="formula">
+        <p><span class="lbl">Valuation model</span> <b id="formula"></b></p>
+        <p class="fine">FARM verdicts additionally account for capital opportunity cost, fees and hands-on time. Model estimates are scenarios, not token-launch forecasts or airdrop guarantees. <button class="link" type="button" data-goto="method">How to read this radar</button></p>
+      </div>
+    </section>
+
+    <div id="front">
+      <section class="kpis" id="kpis"></section>
+      <p class="methline" id="methline"></p>
+      <section class="acct" id="acct"></section>
+      <section class="evidence" id="evidence"></section>
+    </div>
+
     <nav class="tabs" aria-label="Views">
       <button class="tab on" data-tab="board" type="button">Ranked board</button>
       <button class="tab" data-tab="comps" type="button">Priced comps</button>
-      <button class="tab" data-tab="method" type="button">Method and tests</button>
+      <button class="tab" data-tab="method" type="button">Method &amp; tests</button>
     </nav>
 
     <section id="view-board" class="view">
-      <div class="controls">
+      <div class="vrow">
         <div class="pills" id="pills"></div>
+        <p class="farmnote" id="farmnote"></p>
+      </div>
+      <div class="controls">
+        <input id="f-search" type="search" placeholder="Search protocols…" autocomplete="off">
+        <select id="f-cat"><option value="">Category</option></select>
+        <select id="f-chain"><option value="">Chain</option></select>
         <div class="scenario" id="scenario"></div>
-        <div class="filters">
-          <input id="f-search" type="search" placeholder="Search name, category, chain" autocomplete="off">
-          <select id="f-cat"><option value="">All categories</option></select>
-          <select id="f-chain"><option value="">All listed chains</option></select>
-          <button class="ghost" data-preset="reset" type="button">Reset</button>
-          <button class="ghost" id="btn-csv" type="button">CSV</button>
-          <button class="ghost" id="btn-json" type="button">JSON</button>
-          <p class="count" id="count"></p>
-        </div>
       </div>
-      <h2 class="board-title" id="board-title">Ranked board</h2>
-      <div class="table-wrap">
-        <table class="grid">
-          <thead>
-            <tr>
-              <th data-sort="rank"># · range</th>
-              <th data-sort="name">Protocol</th>
-              <th data-sort="tvl_usd">TVL</th>
-              <th data-sort="change_7d">7d</th>
-              <th data-sort="years_listed">Age</th>
-              <th data-sort="token_odds">Token odds</th>
-              <th data-sort="value_if_launches">If it launches</th>
-              <th data-sort="implied_value_usd">Implied value</th>
-              <th data-sort="p25">P25–P75</th>
-              <th data-sort="verdict">Verdict · net of fees</th>
-              <th data-sort="net_per_hour">Net / hour</th>
-            </tr>
-          </thead>
-          <tbody id="board-body"></tbody>
-        </table>
+      <div class="bhead">
+        <h2 id="board-title">Ranked protocols</h2>
+        <p class="count" id="count"></p>
+        <button class="ghost" data-preset="reset" type="button">Reset</button>
+        <button class="ghost" id="btn-csv" type="button">CSV</button>
+        <button class="ghost" id="btn-json" type="button">JSON</button>
       </div>
+      <table class="grid">
+        <colgroup><col style="width:48px"><col style="width:260px"><col style="width:112px"><col style="width:78px"><col style="width:66px"><col style="width:132px"><col style="width:118px"><col style="width:150px"><col style="width:262px"><col></colgroup>
+        <thead>
+          <tr>
+            <th data-sort="rank" class="num">#</th>
+            <th data-sort="name">Protocol</th>
+            <th data-sort="tvl_usd" class="num">TVL</th>
+            <th data-sort="change_7d" class="num">7d</th>
+            <th data-sort="years_listed" class="num">Age</th>
+            <th data-sort="token_odds">Token odds</th>
+            <th data-sort="implied_value_usd" class="num">Implied value</th>
+            <th data-sort="p25" class="num">P25–P75</th>
+            <th data-sort="verdict">Verdict · net of fees</th>
+            <th data-sort="net_per_hour" class="num">Net / hour</th>
+          </tr>
+        </thead>
+        <tbody id="board-body"></tbody>
+      </table>
       <p class="foot" id="foot"></p>
     </section>
 
     <section id="view-comps" class="view hidden">
-      <div class="section-intro">
+      <div class="intro">
         <h2>Priced comps</h2>
-        <p>These 92 protocols already record a priced token and are not on the house set-aside list. They are the size-curve sample, not ranked on the board.</p>
+        <p id="comps-intro"></p>
       </div>
-      <div id="calib-full"></div>
-      <div class="table-wrap">
-        <table class="grid">
-          <thead>
-            <tr>
-              <th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>Cap / TVL</th><th>Size-curve fit</th><th>LOO fit</th><th>Actual / fit</th>
-            </tr>
-          </thead>
-          <tbody id="comps-body"></tbody>
-        </table>
-      </div>
+      <table class="grid comps">
+        <thead>
+          <tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">Cap / TVL</th><th class="num">Size-curve fit</th><th class="num">LOO fit</th><th class="num">Actual / fit</th></tr>
+        </thead>
+        <tbody id="comps-body"></tbody>
+      </table>
     </section>
 
     <section id="view-method" class="view hidden">
-      <div class="section-intro">
-        <h2>Method and tests</h2>
-        <p>A term is kept only when it improves both leave-one-out and walk-forward tests. Farming counts under other assumptions are scenarios, not additional observations.</p>
-      </div>
       <div id="method-body"></div>
     </section>
   </div>
@@ -100,4 +103,3 @@
   <script src="app.js"></script>
 </body>
 </html>
-

@@ -7,34 +7,22 @@ const M = R.model;
 const S0 = R.scenario;
 const TBILL = S0.tbill;
 
-const ACCENT = ['#0f766e', '#1c1917', '#78716c', '#b45309', '#57534e', '#a8a29e', '#115e59', '#d6d3d1', '#44403c'];
-const LEDGER_META = [
-  ['watchlist', 'Ranked · watchlist', '#0f766e'],
-  ['early', 'Ranked · early, below the floor', '#1c1917'],
-  ['off-list', 'Ranked · off-list, parent recorded', '#b45309'],
-  ['priced', 'Token trades · priced comp', '#57534e'],
-  ['token-nocap', 'Token recorded · no usable cap', '#a8a29e'],
-  ['out-bridge', 'Out · bridge', '#d6d3d1'],
-  ['out-lst', 'Out · liquid staking', '#78716c'],
-  ['out-cex', 'Out · exchange', '#44403c'],
-  ['out-versioned', 'Out · versioned or wrapped', '#e7e5e4'],
+const CLASS_META = [
+  ['ranked', 'pre-token, ranked', '#0f766e', ['watchlist', 'early', 'off-list']],
+  ['priced', 'priced comps', '#1c1917', ['priced']],
+  ['nocap', 'token, no usable cap', '#8f9393', ['token-nocap']],
+  ['out', 'out by house rules', '#d5d9d9', ['out-bridge', 'out-lst', 'out-cex', 'out-versioned', 'out-other']],
 ];
+const LEDGER_NAMES = {
+  watchlist: 'Ranked · watchlist', early: 'Ranked · early, below the floor', 'off-list': 'Ranked · off-list, parent recorded',
+  priced: 'Token trades · priced comp', 'token-nocap': 'Token recorded · no usable cap', 'out-bridge': 'Out · bridge',
+  'out-lst': 'Out · liquid staking', 'out-cex': 'Out · exchange', 'out-versioned': 'Out · versioned or wrapped', 'out-other': 'Out · other',
+};
 
 const state = {
-  tab: 'board',
-  sort: 'rank',
-  dir: 1,
-  search: '',
-  cat: '',
-  chain: '',
-  bucket: '',
-  verdict: '',
-  depositMode: '10k',
-  deposit: S0.deposit,
-  share: S0.drop_share,
-  weeks: S0.weeks,
-  wage: S0.wage,
-  open: null,
+  tab: 'board', sort: 'rank', dir: 1, search: '', cat: '', chain: '', bucket: '', verdict: '',
+  depositMode: '10k', deposit: S0.deposit, share: S0.drop_share, weeks: S0.weeks, wage: S0.wage,
+  hurdle: 'additive', open: null,
 };
 
 function clamp(n, lo, hi) { return Math.min(hi, Math.max(lo, n)); }
@@ -57,15 +45,10 @@ function oddsOf(r) {
   for (let i = 0; i < x.length; i++) z += (M.odds_w[i + 1] ?? 0) * x[i];
   return sigmoid(z);
 }
-function impliedOf(r) {
-  return Math.max(1, Math.round(predSize(r.tvl_usd) * oddsOf(r) * r.kinship_share));
-}
+function impliedOf(r) { return Math.max(1, Math.round(predSize(r.tvl_usd) * oddsOf(r) * r.kinship_share)); }
 function fnv1aHex(text) {
   let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); }
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 function money(n, d = 1) {
@@ -81,243 +64,149 @@ function usd2(n) {
   const sign = n < 0 ? '−' : '';
   return `${sign}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
+function usd0(n) { return `${n < 0 ? '−' : ''}$${Math.round(Math.abs(n)).toLocaleString('en-US')}`; }
+function signed(n) { return `${n < 0 ? '−' : '+'}${usd2(Math.abs(n))}`; }
 function pct(n, d = 0) { return `${(n * 100).toFixed(d)}%`; }
 function fmtYears(y) {
   if (y == null) return '—';
-  if (y >= 2) return `${y.toFixed(1)} yr`;
   if (y >= 1) return `${y.toFixed(1)} yr`;
   return `${Math.round(y * 365)} d`;
 }
 function chg(v) {
   if (v == null) return '—';
   const cls = v > 0 ? 'up' : v < 0 ? 'dn' : '';
-  return `<span class="chg ${cls}">${v > 0 ? '+' : ''}${v.toFixed(1)}%</span>`;
+  return `<span class="chg ${cls}">${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(1)}%</span>`;
 }
-function depositOf(r) {
-  if (state.depositMode === 'tvl') return Math.max(1, r.tvl_usd * 0.0002);
-  return state.deposit;
-}
+
+/* Farm economics. Default hurdle is additive: net must beat the T-bill alternative plus hours × wage.
+   The raw-net screen (net > T-bill and net / hour > wage) is a sensitivity toggle on the same records. */
+function depositOf(r) { return state.depositMode === 'tvl' ? Math.max(1, r.tvl_usd * 0.0002) : state.deposit; }
 function hoursOf(r) { return round((r.setup_min + state.weeks * r.weekly_min) / 60, 1); }
-function ecoOf(r, implied) {
+function ecoOf(r, implied, hurdleKind = state.hurdle) {
   const deposit = depositOf(r);
   const hours = hoursOf(r);
   const drop = implied * state.share * (deposit / (r.tvl_usd + deposit));
   const net = drop - r.fees_usd;
   const tbill = deposit * TBILL * (state.weeks / 52);
-  const hurdle = tbill + hours * state.wage;
+  const labor = hours * state.wage;
+  const hurdle = tbill + labor;
   const inc = net - tbill;
   const adj = hours > 0 ? inc / hours : inc;
   const raw = hours > 0 ? net / hours : net;
   let verdict = 'SKIP';
-  if (net > hurdle) verdict = 'FARM';
+  if (hurdleKind === 'raw') {
+    if (net > tbill && raw > state.wage) verdict = 'FARM';
+    else if (net > tbill) verdict = 'THIN';
+  } else if (net > hurdle) verdict = 'FARM';
   else if (net > tbill) verdict = 'THIN';
-  return { deposit, hours, drop, net, tbill, hurdle, inc, adj, raw, verdict };
+  const ph = hurdleKind === 'raw' ? raw : adj;
+  return { deposit, hours, drop, net, tbill, labor, hurdle, inc, adj, raw, ph, verdict };
 }
-function live(r) {
-  const implied = r.implied_value_usd;
-  return { implied, ...ecoOf(r, implied) };
+function live(r) { const implied = r.implied_value_usd; return { implied, ...ecoOf(r, implied) }; }
+function counts(kind = state.hurdle) {
+  const o = { FARM: 0, THIN: 0, SKIP: 0 };
+  for (const r of R.rows) o[ecoOf(r, r.implied_value_usd, kind).verdict]++;
+  return o;
+}
+function scenarioLabel() {
+  const dep = state.depositMode === 'tvl' ? '0.02% of TVL' : usd0(state.deposit);
+  return `${dep} · ${(state.share * 100).toFixed(1)}% share · ${state.weeks} wk · $${state.wage}/h`;
 }
 
 function integrity() {
-  let match = 0, rise = 0, sum = 0;
-  let prev = Infinity;
+  let match = 0, rise = 0, sum = 0, prev = Infinity;
   for (const r of R.rows) {
     if (impliedOf(r) === r.implied_value_usd) match++;
     sum += r.implied_value_usd;
     if (r.implied_value_usd > prev + 1e-9) rise++;
     prev = r.implied_value_usd;
   }
-  const src = R.rows.map((r) => `${r.slug}:${r.rank}:${r.implied_value_usd}`).join('|');
-  const sumC = fnv1aHex(src);
+  const checksum = fnv1aHex(R.rows.map((r) => `${r.slug}:${r.rank}:${r.implied_value_usd}`).join('|'));
   const watch = R.watchlist.filter((s) => R.rows.some((r) => r.slug === s)).length;
   const ledgerN = Object.values(R.ledger).reduce((s, n) => s + n, 0);
-  return {
-    match, n: R.rows.length, rise, sum, checksum: sumC,
-    checksumOk: sumC === R.checksum, watch, watchN: R.watchlist.length, ledgerN,
-  };
-}
-
-function kpiHtml() {
-  const t = ev.value.typ_miss;
-  const rh = ev.value.range_honesty;
-  const br = ev.odds.brier;
-  const ac = ev.odds.accuracy;
-  const vt = ev.value.terms.filter((x) => x.kept).length;
-  const vAll = ev.value.terms.filter((x) => x.term !== 'flat median multiple').length;
-  const ot = ev.odds.terms_tried.filter((x) => x.kept).length;
-  const oAll = ev.odds.terms_tried.filter((x) => x.term !== 'base rate of peers').length;
-  const items = [
-    { lbl: 'Out-of-sample typ miss, walk-forward', val: `×${t.size_wf.toFixed(2)}`, sub: `vs ×${t.flat_wf.toFixed(2)} flat · leave-one-out ×${t.size_loo.toFixed(2)} vs ×${t.flat_loo.toFixed(2)}` },
-    { lbl: 'Is the printed range honest?', val: `${pct(rh.loo_p25)} · ${pct(rh.loo_p10, 0)}`, sub: `of ${rh.n} listed caps inside P25–P75 · P10–P90 (stated 50% · 80%). Walk-forward ${pct(rh.wf_p25)} · ${pct(rh.wf_p10)}. Within ×3: ${pct(rh.loo_within_x3)} LOO, ${pct(rh.wf_within_x3)} WF.` },
-    { lbl: 'Token odds vs base rate, Brier', val: br.model_10f.toFixed(3), sub: `vs ${br.base.toFixed(3)} ten-fold · walk-forward ${br.model_wf.toFixed(3)} vs ${br.base_wf.toFixed(3)}. Called right ${pct(ac.model_10f)} vs ${pct(ac.base_10f)}; later peers ${pct(ac.model_wf)} vs ${pct(ac.base_wf)}.` },
-    { lbl: 'Terms that survived both tests', val: `${vt} of ${vAll} · ${ot} of ${oAll}`, sub: 'value model · token odds; the rest are shown below, not used' },
-    { lbl: 'Worth farming, this scenario', val: `${ev.farm.farm} of ${ev.integrity.n_rows}`, sub: `additive hurdle: net beats T-bill plus hours × $25; ${ev.farm.thin} thin, ${ev.farm.skip} skip` },
-    { lbl: 'Watchlist ranked', val: `${ev.integrity.watch_covered} / ${R.watchlist.length}`, sub: `plus ${R.rows.length - ev.integrity.watch_covered} other pre-token protocols the board ranks` },
-  ];
-  return items.map((k) => `<article class="kpi"><div class="lbl">${k.lbl}</div><div class="val">${k.val}</div><div class="sub">${k.sub}</div></article>`).join('');
-}
-
-function acctHtml() {
-  const L = R.ledger;
-  const total = Object.values(L).reduce((s, n) => s + n, 0);
-  const segs = LEDGER_META.filter((x) => (L[x[0]] || 0) > 0);
-  const bar = segs.map(([k, , c]) => `<i style="width:${((L[k] / total) * 100).toFixed(3)}%;background:${c}"></i>`).join('');
-  const legend = segs.map(([k, label, c]) => `<span><i style="background:${c}"></i>${label} <b>${L[k]}</b></span>`).join('');
-  return `<h3>Protocol accounting</h3>
-    <p class="note" style="font-size:10px;color:var(--muted);margin:0 0 4px">All ${total} snapshot protocols in exactly one group: ${R.rows.length} ranked as pre-token, ${L.priced} already record a priced token, ${total - R.rows.length - L.priced} left out by the house list’s own rules.</p>
-    <div class="bar">${bar}</div>
-    <div class="legend">${legend}</div>`;
-}
-
-function auditHtml() {
-  const ig = integrity();
   const bits = [
-    [`this table = board.json: ${ig.match} of ${ig.n} rows recomputed here`, ig.match === ig.n],
-    [`ranks 1–${ig.n} in order, values never rise`, ig.rise === 0],
-    [`totals equal ${money(ig.sum, 2)}`, true],
-    [`checksum ${ig.checksum} = main.ts`, ig.checksumOk],
-    [`watchlist ${ig.watch} of ${ig.watchN} ranked`, ig.watch === ig.watchN],
-    [`ledger ${ig.ledgerN} of ${ig.ledgerN} protocols`, ig.ledgerN === ev.integrity.ledger_total],
+    [`table = board.json: ${match} of ${R.rows.length} implied values recomputed here`, match === R.rows.length],
+    [`ranks 1–${R.rows.length} in order, values never rise`, rise === 0],
+    [`totals equal ${money(sum, 2)}`, Number.isFinite(sum)],
+    [`checksum ${checksum} = main.ts`, checksum === R.checksum],
+    [`watchlist ${watch} of ${R.watchlist.length} ranked`, watch === R.watchlist.length],
+    [`ledger ${ledgerN} of ${ev.integrity.ledger_total} protocols`, ledgerN === ev.integrity.ledger_total],
   ];
-  return bits.map(([t, ok]) => `<span class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✕'} ${t}</span>`).join('');
+  return { bits, ok: bits.filter((b) => b[1]).length, checksum };
 }
 
-function dec(row) {
-  if (row.decision === 'must not help') return '<span class="drop">must not help</span>';
-  if (row.kept) return '<span class="kept">kept</span>';
-  if (row.decision === 'baseline') return '<span class="base">baseline</span>';
-  return '<span class="drop">tested, not kept</span>';
-}
-
-function evidenceHtml() {
-  const vrows = ev.value.terms.map((t) => `<tr><td>${t.term}</td><td class="num">×${t.loo.toFixed(2)}</td><td class="num">×${t.wf.toFixed(2)}</td><td>${dec(t)}</td></tr>`).join('');
-  const orows = ev.odds.terms_tried.map((t) => {
-    const acc = t.term.startsWith('+') || t.term === 'years listed' ? '' : '';
-    return `<tr><td>${t.term}</td><td class="num">${t.kfold.toFixed(3)}</td><td class="num">${t.wf.toFixed(3)}</td><td>${dec(t)}</td></tr>`;
-  }).join('');
-  const rh = ev.value.range_honesty;
-  const ac = ev.odds.accuracy;
+/* Front: four evidence figures, one methodology line, one classification line */
+function kpiHtml() {
+  const t = ev.value.typ_miss, rh = ev.value.range_honesty, br = ev.odds.brier, ac = ev.odds.accuracy;
+  const c = counts();
   return `
-    <div class="card">
-      <h3>Value if a token launches · typical miss, ${ev.comps} priced comps</h3>
-      <p class="note">Kept only if leave-one-out and walk-forward miss both fall (earlier-listed comps price later ones).</p>
-      <table class="mini"><thead><tr><th>Term, added in order</th><th class="num">Leave-one-out</th><th class="num">Walk-forward</th><th></th></tr></thead><tbody>${vrows}</tbody></table>
-    </div>
-    <div class="card">
-      <h3>Token odds · Brier score, ${ev.peers} peers (${ev.peers_with_token} with a token)</h3>
-      <p class="note">Called right at 0.5: ten-fold ${pct(ac.model_10f)} vs ${pct(ac.base_10f)}; walk-forward ${pct(ac.model_wf)} vs ${pct(ac.base_wf)}. Not a launch forecast.</p>
-      <table class="mini"><thead><tr><th>Term, added in order</th><th class="num">Ten-fold</th><th class="num">Walk-forward</th><th></th></tr></thead><tbody>${orows}</tbody></table>
-    </div>
-    <div class="card">
-      <h3>Is the printed range honest?</h3>
-      <p class="note">Share of real caps inside the printed interval.</p>
-      <table class="mini">
-        <thead><tr><th></th><th class="num">Leave-one-out</th><th class="num">Walk-forward</th></tr></thead>
-        <tbody>
-          <tr><td>Within ×3 of the model</td><td class="num">${pct(rh.loo_within_x3)}</td><td class="num">${pct(rh.wf_within_x3)}</td></tr>
-          <tr><td>Inside P25–P75, stated 50%</td><td class="num">${pct(rh.loo_p25)}</td><td class="num">${pct(rh.wf_p25)}</td></tr>
-          <tr><td>Inside P10–P90, stated 80%</td><td class="num">${pct(rh.loo_p10)}</td><td class="num">${pct(rh.wf_p10)}</td></tr>
-        </tbody>
-      </table>
-      <p class="note" style="margin-top:4px">Multiple at $100M TVL ×${ev.value.multiple_at_100m.toFixed(3)}; slope ${ev.value.b.toFixed(3)} on ln TVL. ${rh.n_boot} held-out residual draws, not widened. Walk-forward n = ${rh.wf_n}.</p>
-    </div>`;
+    <article class="kpi lead"><div class="lbl">Walk-forward valuation error</div>
+      <div class="row"><span class="val">×${t.size_wf.toFixed(2)}</span><span class="vs">vs <b>×${t.flat_wf.toFixed(2)}</b> flat baseline</span></div>
+      <div class="sub">Typical multiplicative miss · earlier comps price later ones · n=${ev.value.wf_split.test}</div></article>
+    <article class="kpi lead"><div class="lbl">Walk-forward token-odds Brier</div>
+      <div class="row"><span class="val">${br.model_wf.toFixed(3)}</span><span class="vs">vs <b>${br.base_wf.toFixed(3)}</b> base rate</span></div>
+      <div class="sub">Lower is better · n=${ac.n_wf} later peers · called right ${pct(ac.model_wf, 1)} vs ${pct(ac.base_wf, 1)}</div></article>
+    <article class="kpi limit"><div class="lbl">Prediction interval coverage <span class="tag amber">Undercovers</span></div>
+      <div class="row"><span class="val">${pct(rh.wf_p10)}</span><span class="vs">vs <b>80%</b> target</span></div>
+      <div class="sub">Walk-forward P10–P90, n=${rh.wf_n} · leave-one-out ${pct(rh.loo_p10, 1)} vs 80%</div></article>
+    <article class="kpi"><div class="lbl">FARM-qualified under current assumptions</div>
+      <div class="row"><span class="val">${c.FARM} / ${R.rows.length}</span><span class="vs">${c.THIN} thin · ${c.SKIP} skip</span></div>
+      <div class="sub">${scenarioLabel()}${state.hurdle === 'raw' ? ' · raw-net sensitivity' : ''}</div></article>`;
+}
+function methlineHtml() {
+  const t = ev.value.typ_miss, br = ev.odds.brier, ac = ev.odds.accuracy;
+  const vt = ev.value.terms.filter((x) => x.kept).length;
+  const vAll = ev.value.terms.filter((x) => x.decision !== 'baseline').length;
+  const ot = ev.odds.terms_tried.filter((x) => x.kept).length;
+  const oAll = ev.odds.terms_tried.filter((x) => x.decision !== 'baseline').length;
+  return `Inputs <b>TVL · 7-day growth · years listed without a token · name-stem family</b> · Leave-one-out value miss <b>×${t.size_loo.toFixed(2)}</b> vs ×${t.flat_loo.toFixed(2)} (n=${ev.comps}) · Ten-fold Brier <b>${br.model_10f.toFixed(3)}</b> vs ${br.base.toFixed(3)} (n=${ac.n_10f}) · Features retained after out-of-sample testing <b>${vt} of ${vAll}</b> value · <b>${ot} of ${oAll}</b> odds · Watchlist <b>${ev.integrity.watch_covered}/${R.watchlist.length}</b> ranked`;
+}
+function classes() {
+  return CLASS_META.map(([k, label, color, keys]) => ({ k, label, color, n: keys.reduce((s, x) => s + (R.ledger[x] || 0), 0) }));
+}
+function acctHtml() {
+  const total = Object.values(R.ledger).reduce((s, n) => s + n, 0);
+  const cl = classes();
+  const bar = cl.map((c) => `<i style="width:${((c.n / total) * 100).toFixed(2)}%;background:${c.color}"></i>`).join('');
+  const legend = cl.map((c) => `<i style="background:${c.color}"></i><b>${c.n}</b> ${c.label}`).join(' ');
+  return `<h3>Snapshot classification · <b>${total} protocols</b></h3><div class="bar">${bar}</div><p class="legend">${legend}</p>`;
 }
 
-function calibSvg(height = 160) {
-  const pts = R.comps.map((c) => ({ x: Math.log(Math.max(c.loo_fitted, 1)), y: Math.log(Math.max(c.mcap_usd, 1)) }));
-  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
-  const lo = Math.min(...xs, ...ys), hi = Math.max(...xs, ...ys);
-  const w = 640, h = height, L = 36, Rgt = w - 10, T = 10, B = h - 22;
-  const X = (v) => L + (v - lo) / (hi - lo) * (Rgt - L);
-  const Y = (v) => B - (v - lo) / (hi - lo) * (B - T);
-  const dots = pts.map((p) => `<circle cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="2.2" fill="#0f766e" fill-opacity=".75"/>`).join('');
-  return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Calibration of leave-one-out size-curve fits against listed caps">
-    <line x1="${X(lo).toFixed(1)}" y1="${Y(lo).toFixed(1)}" x2="${X(hi).toFixed(1)}" y2="${Y(hi).toFixed(1)}" stroke="#1c1917" stroke-width="1"/>
-    ${dots}
-    <text x="${L}" y="${h - 6}">Leave-one-out fitted cap →</text>
-    <text x="12" y="${B}" transform="rotate(-90 12 ${B})">Listed cap →</text>
-  </svg>`;
-}
-
-function tornadoHtml() {
-  const rows = ev.sensitivity;
-  const main = rows[0].farm;
-  const arms = rows.slice(1);
-  const maxD = Math.max(...arms.map((s) => Math.abs(s.farm - main)), 1);
-  return arms.map((s) => {
-    const d = s.farm - main;
-    const pctw = (Math.abs(d) / maxD) * 50;
-    const left = d >= 0 ? 50 : 50 - pctw;
-    return `<div class="arm"><div class="lab">${s.name}</div><div class="barwrap"><i class="${d < 0 ? 'neg' : ''}" style="left:${left}%;width:${pctw}%"></i></div><div class="num">${s.farm} (${d >= 0 ? '+' : ''}${d})</div></div>`;
+/* Board */
+function pillsHtml() {
+  const c = counts();
+  const v = [['', `All`, R.rows.length, ''], ['FARM', 'FARM', c.FARM, '#0f766e'], ['THIN', 'THIN', c.THIN, '#b45309'], ['SKIP', 'SKIP', c.SKIP, '#b42318']];
+  const b = [['watchlist', 'Watchlist'], ['early', 'Early'], ['off-list', 'Off-list']];
+  const vp = v.map(([val, lab, n, col]) => {
+    const on = val === '' ? !state.verdict && !state.bucket : state.verdict === val;
+    return `<button class="pill${on ? ' on' : ''}" type="button" data-kind="verdict" data-val="${val}">${col ? `<span class="dot" style="background:${col}"></span>` : ''}${lab}<b>${n}</b></button>`;
   }).join('');
+  const bp = b.map(([val, lab]) => `<button class="pill${state.bucket === val ? ' on' : ''}" type="button" data-kind="bucket" data-val="${val}">${lab}</button>`).join('');
+  return `${vp}<span class="sep"></span>${bp}`;
 }
-
-function extrasHtml() {
+function farmnoteHtml() {
+  const c = counts();
+  const rule = state.hurdle === 'raw'
+    ? 'Sensitivity: net beats T-bill and net / hour beats $' + state.wage
+    : `How FARM is determined: net must beat the T-bill alternative plus hours × $${state.wage}`;
+  return `<span>${rule} · <b>${c.FARM}/${R.rows.length}</b> under ${scenarioLabel()}</span>
+    <span class="seg" role="group" aria-label="Hurdle"><button type="button" data-hurdle="additive" class="${state.hurdle === 'additive' ? 'on' : ''}">Additive hurdle</button><button type="button" data-hurdle="raw" class="${state.hurdle === 'raw' ? 'on' : ''}">Raw-net screen</button></span>`;
+}
+function scenarioHtml() {
+  const mode = state.depositMode;
+  const opt = (v, l) => `<option value="${v}"${mode === v ? ' selected' : ''}>${l}</option>`;
   return `
-    <div class="card cal"><h3>Calibration · leave-one-out fitted cap vs listed cap</h3>
-      <p class="note">Each point is a priced comp held out of the size curve. The line is one-to-one. A well-calibrated model hugs the line on the log-log scale.</p>
-      ${calibSvg()}</div>
-    <div class="card tornado"><h3>Sensitivity tornado · FARM count vs the main scenario (${ev.farm.farm})</h3>
-      <p class="note">One assumption moves at a time. Depositor share and deposit size move the count most.</p>
-      ${tornadoHtml()}</div>`;
+    <label>Deposit <select id="f-deposit">${opt('10k', '$10K')}${opt('3k', '$3K')}${opt('30k', '$30K')}${opt('tvl', '0.02% of TVL')}${opt('custom', 'Custom')}</select></label>
+    ${mode === 'custom' ? `<label>$ <input id="f-dep-n" type="number" min="100" step="100" value="${state.deposit}"></label>` : ''}
+    <label>Drop share <input id="f-share" type="range" min="2" max="15" step="0.5" value="${(state.share * 100).toFixed(1)}"><b>${(state.share * 100).toFixed(1)}%</b></label>
+    <label>Horizon <input id="f-weeks" type="range" min="4" max="24" step="1" value="${state.weeks}"><b>${state.weeks} wk</b></label>`;
 }
-
 function fillSelects() {
   const cats = [...new Set(R.rows.map((r) => r.category).filter(Boolean))].sort();
   const chains = [...new Set(R.rows.flatMap((r) => r.chains))].sort();
-  const cat = $('#f-cat');
-  const ch = $('#f-chain');
-  for (const c of cats) cat.append(new Option(c, c));
-  for (const c of chains) ch.append(new Option(c, c));
+  for (const c of cats) $('#f-cat').append(new Option(c, c));
+  for (const c of chains) $('#f-chain').append(new Option(c, c));
 }
-
-function pillsHtml() {
-  const c = counts();
-  const items = [
-    ['', `All ${R.rows.length}`],
-    ['FARM', `Farm ${c.FARM}`],
-    ['THIN', `Thin ${c.THIN}`],
-    ['SKIP', `Skip ${c.SKIP}`],
-    ['|', '|'],
-    ['watchlist', 'Watchlist'],
-    ['early', 'Early (< $50.0M)'],
-    ['off-list', 'Off-list'],
-  ];
-  return items.map(([v, lab]) => {
-    if (v === '|') return '<span style="color:var(--line)">|</span>';
-    const on = v === 'FARM' || v === 'THIN' || v === 'SKIP' ? state.verdict === v : state.bucket === v;
-    const kind = v === 'FARM' || v === 'THIN' || v === 'SKIP' ? 'verdict' : 'bucket';
-    return `<button class="pill${on || (v === '' && !state.verdict && !state.bucket) ? ' on' : ''}" type="button" data-kind="${kind}" data-val="${v}">${lab}</button>`;
-  }).join('');
-}
-
-function scenarioHtml() {
-  const mode = state.depositMode;
-  return `
-    <label>Deposit
-      <select id="f-deposit">
-        <option value="10k"${mode === '10k' ? ' selected' : ''}>$10,000</option>
-        <option value="3k"${mode === '3k' ? ' selected' : ''}>$3,000</option>
-        <option value="30k"${mode === '30k' ? ' selected' : ''}>$30,000</option>
-        <option value="tvl"${mode === 'tvl' ? ' selected' : ''}>plan size, 0.02% of TVL</option>
-        <option value="custom"${mode === 'custom' ? ' selected' : ''}>custom</option>
-      </select>
-    </label>
-    ${mode === 'custom' ? `<label>$<input id="f-dep-n" type="number" min="100" step="100" value="${state.deposit}" style="width:90px"></label>` : ''}
-    <label>Drop share ${(state.share * 100).toFixed(1)}%
-      <input id="f-share" type="range" min="2" max="15" step="0.5" value="${(state.share * 100).toFixed(1)}">
-    </label>
-    <label>Horizon ${state.weeks} wk
-      <input id="f-weeks" type="range" min="4" max="24" step="1" value="${state.weeks}">
-    </label>`;
-}
-
-function counts() {
-  const o = { FARM: 0, THIN: 0, SKIP: 0 };
-  for (const r of R.rows) o[live(r).verdict]++;
-  return o;
-}
-
 function filtered() {
   const q = state.search.trim().toLowerCase();
   let rows = R.rows.map((r) => ({ r, L: live(r) }));
@@ -325,17 +214,12 @@ function filtered() {
   if (state.bucket) rows = rows.filter((x) => x.r.bucket === state.bucket);
   if (state.cat) rows = rows.filter((x) => x.r.category === state.cat);
   if (state.chain) rows = rows.filter((x) => x.r.chains.includes(state.chain));
-  if (q) {
-    rows = rows.filter((x) => {
-      const r = x.r;
-      return r.name.toLowerCase().includes(q) || (r.category || '').toLowerCase().includes(q) || r.chains.some((c) => c.toLowerCase().includes(q)) || r.slug.includes(q);
-    });
-  }
-  const key = state.sort;
+  if (q) rows = rows.filter(({ r }) => r.name.toLowerCase().includes(q) || (r.category || '').toLowerCase().includes(q) || r.chains.some((c) => c.toLowerCase().includes(q)) || r.slug.includes(q));
+  const key = state.sort, dir = state.dir;
+  const order = { FARM: 0, THIN: 1, SKIP: 2 };
   rows.sort((A, B) => {
-    const dir = state.dir;
-    if (key === 'verdict') return dir * A.L.verdict.localeCompare(B.L.verdict) || A.r.rank - B.r.rank;
-    if (key === 'net_per_hour') return dir * (A.L.adj - B.L.adj) || A.r.rank - B.r.rank;
+    if (key === 'verdict') return dir * (order[A.L.verdict] - order[B.L.verdict]) || A.r.rank - B.r.rank;
+    if (key === 'net_per_hour') return dir * (A.L.ph - B.L.ph) || A.r.rank - B.r.rank;
     if (key === 'name') return dir * A.r.name.localeCompare(B.r.name);
     const av = A.r[key], bv = B.r[key];
     if (av == null && bv == null) return 0;
@@ -346,39 +230,58 @@ function filtered() {
   });
   return rows;
 }
-
-function rowHtml(x) {
-  const r = x.r, L = x.L;
-  const badges = [
-    r.on_watchlist ? '<span class="badge w">Watchlist</span>' : '',
-    r.bucket === 'off-list' ? '<span class="badge o">Off-list</span>' : '',
-    r.kinship ? `<span class="badge p">Parent ×${r.kinship_share}</span>` : '',
+function rowHtml({ r, L }) {
+  const marks = [
+    r.on_watchlist ? '<span class="mark">Watchlist</span>' : '',
+    r.bucket === 'off-list' ? '<span class="mark o">Off-list</span>' : '',
+    r.kinship ? `<span class="mark p">Parent ×${r.kinship_share}</span>` : '',
   ].join('');
-  const netCls = L.net >= 0 ? 'pos' : 'neg';
   return `<tr data-slug="${r.slug}">
-    <td class="num">${r.rank}<div class="subn">${r.rank_lo}–${r.rank_hi}</div></td>
-    <td><span class="name">${r.name}</span>${badges}<span class="subn">${r.category ?? '—'} · ${r.chain_label}${r.chains.length > 1 ? ` · +${r.chains.length - 1}` : ''}</span></td>
+    <td class="num"><span class="rk">${r.rank}</span><span class="subn">${r.rank_lo}–${r.rank_hi}</span></td>
+    <td><span class="name">${r.name}</span>${marks}<span class="subn">${r.category ?? '—'} · ${r.chain_label}${r.chains.length > 1 ? ` +${r.chains.length - 1}` : ''}</span></td>
     <td class="num">${money(r.tvl_usd)}</td>
     <td class="num">${chg(r.change_7d)}</td>
     <td class="num">${fmtYears(r.years_listed)}</td>
-    <td class="num"><span class="obar" style="--p:${(r.token_odds * 100).toFixed(1)}%"></span>${pct(r.token_odds)}</td>
-    <td class="num">${money(r.value_if_launches)}</td>
-    <td class="num">${money(r.implied_value_usd)}</td>
+    <td><span class="obar"><i style="width:${(r.token_odds * 100).toFixed(1)}%"></i></span>${pct(r.token_odds)}</td>
+    <td class="num"><b>${money(r.implied_value_usd)}</b></td>
     <td class="num">${money(r.p25)}–${money(r.p75)}</td>
-    <td><span class="ver ${L.verdict}">${L.verdict}</span> <span class="${netCls}">${L.net < 0 ? '−' : '+'}${usd2(L.net).replace('−', '')}</span><div class="subn">${usd2(L.drop)} drop · ${usd2(L.tbill)} T-bill</div></td>
-    <td class="num">${L.adj < 0 ? '−' : ''}${usd2(Math.abs(L.adj))}<div class="subn">${L.hours} h adj.</div></td>
+    <td><span class="ver ${L.verdict}">${L.verdict}</span><span class="net ${L.net >= 0 ? 'pos' : 'neg'}">${signed(L.net)}</span><span class="subn" style="display:inline;margin-left:8px">${usd2(L.drop)} drop · ${usd2(L.tbill)} T-bill</span></td>
+    <td class="num"><span class="nph ${L.ph >= 0 ? 'pos' : 'neg'}">${L.ph < 0 ? '−' : ''}${usd2(Math.abs(L.ph))}</span><span class="subn">${L.hours} h hands-on</span></td>
   </tr>`;
 }
+function renderBoard() {
+  $('#pills').innerHTML = pillsHtml();
+  $('#farmnote').innerHTML = farmnoteHtml();
+  $('#scenario').innerHTML = scenarioHtml();
+  $('#kpis').innerHTML = kpiHtml();
+  const rows = filtered();
+  $('#board-body').innerHTML = rows.map(rowHtml).join('');
+  const tvl = rows.reduce((s, x) => s + x.r.tvl_usd, 0);
+  const imp = rows.reduce((s, x) => s + x.r.implied_value_usd, 0);
+  $('#count').textContent = `${rows.length} of ${R.rows.length} results · ${money(tvl)} TVL · ${money(imp)} implied`;
+  $('#board-title').textContent = state.verdict ? `${state.verdict} protocols — ${state.hurdle === 'raw' ? 'raw-net sensitivity' : 'current assumptions'}` : state.bucket ? `${state.bucket[0].toUpperCase()}${state.bucket.slice(1)} protocols` : 'Ranked protocols';
+  bindLive();
+}
+function bindLive() {
+  const dep = $('#f-deposit');
+  dep.addEventListener('change', () => {
+    state.depositMode = dep.value;
+    state.deposit = { '10k': 10000, '3k': 3000, '30k': 30000, tvl: 10000, custom: state.deposit }[dep.value];
+    renderBoard();
+  });
+  const dn = $('#f-dep-n');
+  if (dn) dn.addEventListener('change', () => { state.deposit = Math.max(100, Number(dn.value) || 10000); renderBoard(); });
+  $('#f-share').addEventListener('input', (e) => { state.share = Number(e.target.value) / 100; renderBoard(); });
+  $('#f-weeks').addEventListener('input', (e) => { state.weeks = Number(e.target.value); renderBoard(); });
+}
 
-function peersOf(r, n = 6) {
+/* Detail drawer: verdict and economics, why, valuation, peers, risks, workflow, source */
+function peersOf(r, n = 5) {
   const lt = Math.log(Math.max(r.tvl_usd, 1));
   return R.comps
     .map((c) => ({ c, d: Math.abs(Math.log(Math.max(c.tvl_usd, 1)) - lt), same: (c.category || '') === (r.category || '') }))
-    .sort((a, b) => (b.same - a.same) || a.d - b.d)
-    .slice(0, n)
-    .map((x) => x.c);
+    .sort((a, b) => (b.same - a.same) || a.d - b.d).slice(0, n).map((x) => x.c);
 }
-
 function coreLine(r, L) {
   const name = r.name, chain = r.chain_label, d = usd2(L.deposit);
   switch (r.plan_kind) {
@@ -393,135 +296,65 @@ function coreLine(r, L) {
 function stepsOf(r, L) {
   const name = r.name, chain = r.chain_label, tvl = money(r.tvl_usd);
   return [
-    `SETUP — Create a wallet used only for this ${name} farm on ${chain}, which the snapshot lists among its deployments, and fund it with about ${usd2(r.fee_tx * 4)} of native gas. COST ${usd2(r.fee_tx)} (one test transfer). TIME ${r.setup_min} min hands-on.`,
-    `VERIFY — Confirm ${name} (${r.category ?? 'uncategorised'}) is listed on ${chain} in this snapshot (${r.chains.length} chain${r.chains.length === 1 ? '' : 's'} recorded). Open it only from its DefiLlama protocol page or official docs, and refuse any DM link. COST $0. TIME 10 min hands-on.`,
-    `FUND — Move the ${usd2(L.deposit)} working deposit to ${chain} through an official bridge or exchange withdrawal. Drop uses protocol-wide TVL (${tvl}); the snapshot does not split TVL by chain. COST about ${usd2(r.fee_bridge)}. TIME 15 min hands-on.`,
-    `CORE — ${coreLine(r, L)} COST about ${usd2(Math.max(0, r.fees_usd - r.fee_bridge))}. TIME 15–25 min hands-on.`,
-    `WATCH — Check the position weekly for ${state.weeks} weeks. Withdraw if protocol-wide TVL prints 15% below this snapshot (${tvl}) or if withdrawals pause. This is a model scenario, not a promise of a token. COST ${usd2(r.fee_tx)} on exit, else $0. TIME ${r.weekly_min} min a week.`,
-    `RECORD — Keep a ledger of every hash, the principal, and modelled fees of ${usd2(r.fees_usd)}. Modelled depositor drop at a ${(state.share * 100).toFixed(1)}% share over ${state.weeks} weeks is ${usd2(L.drop)}; net of fees ${usd2(L.net)}. Opportunity-adjusted return is ${usd2(L.adj)}/h after a ${usd2(L.tbill)} T-bill alternative. COST $0. TIME 5 min a week.`,
+    ['Setup', `Create a wallet used only for this ${name} farm on ${chain}, which the snapshot lists among its deployments, and fund it with about ${usd2(r.fee_tx * 4)} of native gas. Cost ${usd2(r.fee_tx)} (one test transfer). Time ${r.setup_min} min hands-on.`],
+    ['Verify', `Confirm ${name} (${r.category ?? 'uncategorised'}) is listed on ${chain} in this snapshot (${r.chains.length} chain${r.chains.length === 1 ? '' : 's'} recorded). Open it only from its DefiLlama protocol page or official docs, and refuse any DM link. Cost $0. Time 10 min hands-on.`],
+    ['Fund', `Move the ${usd2(L.deposit)} working deposit to ${chain} through an official bridge or exchange withdrawal. Drop uses protocol-wide TVL (${tvl}); the snapshot does not split TVL by chain. Cost about ${usd2(r.fee_bridge)}. Time 15 min hands-on.`],
+    ['Core', `${coreLine(r, L)} Cost about ${usd2(Math.max(0, r.fees_usd - r.fee_bridge))}. Time 15–25 min hands-on.`],
+    ['Monitor', `Check the position weekly for ${state.weeks} weeks. Withdraw if protocol-wide TVL prints 15% below this snapshot (${tvl}) or if withdrawals pause. Cost ${usd2(r.fee_tx)} on exit, else $0. Time ${r.weekly_min} min a week.`],
+    ['Record', `Keep a ledger of every hash, the principal and modelled fees of ${usd2(r.fees_usd)}; reassess against the ${usd2(L.hurdle)} hurdle at each check. Cost $0. Time 5 min a week.`],
   ];
 }
-
+function whyOf(r, L) {
+  const gap = L.net - L.hurdle;
+  if (L.verdict === 'FARM') return `Net of fees <b>${usd2(L.net)}</b> clears the <b>${usd2(L.hurdle)}</b> hurdle (T-bill ${usd2(L.tbill)} + ${L.hours} h × $${state.wage}) by <b>${usd2(gap)}</b>.`;
+  if (L.verdict === 'THIN') return `Net of fees <b>${usd2(L.net)}</b> beats the ${usd2(L.tbill)} T-bill alternative but not the <b>${usd2(L.hurdle)}</b> hurdle once ${L.hours} h of hands-on time is valued at $${state.wage}/h: short by <b>${usd2(-gap)}</b>.`;
+  return `Net of fees <b>${usd2(L.net)}</b> does not beat the ${usd2(L.tbill)} T-bill alternative on a ${usd2(L.deposit)} deposit, so the hands-on time earns nothing: short of the hurdle by <b>${usd2(-gap)}</b>.`;
+}
 function detailHtml(r) {
-  const L = live(r);
-  const vif = predSize(r.tvl_usd);
-  const od = oddsOf(r);
-  const peers = peersOf(r);
-  const steps = stepsOf(r, L);
-  const peerRows = peers.map((c) => `<tr><td>${c.name}${c.symbol ? ` (${c.symbol})` : ''}</td><td>${c.category ?? '—'}</td><td class="num">${money(c.tvl_usd)}</td><td class="num">${money(c.mcap_usd)}</td><td class="num">${(c.mcap_usd / c.tvl_usd).toFixed(2)}×</td><td class="num">${money(c.loo_fitted)}</td></tr>`).join('');
+  const L = live(r), vif = predSize(r.tvl_usd), od = oddsOf(r), rh = ev.value.range_honesty;
+  const peers = peersOf(r).map((c) => `<tr><td>${c.name}${c.symbol ? ` (${c.symbol})` : ''}</td><td>${c.category ?? '—'}</td><td class="num">${money(c.tvl_usd)}</td><td class="num">${money(c.mcap_usd)}</td><td class="num">${(c.mcap_usd / c.tvl_usd).toFixed(3)}×</td><td class="num">${money(c.loo_fitted)}</td></tr>`).join('');
   return `
     <button class="close" type="button" id="btn-close">Close</button>
-    <p class="kicker">${r.category ?? 'Protocol'} · ${r.chain_label}</p>
-    <h2>${r.name}</h2>
-    <p class="lead">${r.on_watchlist ? 'On the house watchlist. ' : ''}${r.kinship ? `Name-stem parent already records a token: ${r.kinship}, adjustment ×${r.kinship_share}. ` : ''}Snapshot as of ${R.as_of}. Model-implied value ${money(r.implied_value_usd)}.</p>
-    <h3>How the figure is made</h3>
-    <ol class="arith">
-      <li>Size curve, if a token were already priced: exp(${M.a.toFixed(3)} + ${M.b.toFixed(3)} × ln TVL) = <b>${money(vif)}</b> on protocol-wide TVL ${money(r.tvl_usd)}.</li>
-      <li>Peer token-record rate from years listed, ln TVL, name-stem family and 7-day growth: <b>${pct(od)}</b> (stored ${pct(r.token_odds)}).</li>
-      <li>Existing-token relationship adjustment: <b>×${r.kinship_share}</b>${r.kinship ? ` because ${r.kinship} already records a token` : ', no matching priced parent'}.</li>
-      <li>Implied value = max(1, rounded product) = <b>${money(r.implied_value_usd)}</b>. Printed P25–P75 is ${money(r.p25)}–${money(r.p75)}; rank range ${r.rank_lo}–${r.rank_hi}.</li>
-      <li>Depositor drop at ${(state.share * 100).toFixed(1)}% of ${usd2(L.deposit)} / (${money(r.tvl_usd)} + deposit) × implied = <b>${usd2(L.drop)}</b>. Net of ${usd2(r.fees_usd)} fees: <b>${usd2(L.net)}</b>.</li>
-      <li>T-bill alternative ${usd2(L.tbill)} on a ${state.weeks}-week horizon. Additive hurdle ${usd2(L.hurdle)}. Opportunity-adjusted return <b>${usd2(L.adj)}/h</b> over ${L.hours} h. Verdict <b>${L.verdict}</b>.</li>
-    </ol>
-    <h3>Nearest priced peers</h3>
-    <p class="note" style="font-size:11px;color:var(--muted);margin:0 0 6px">Closest listed caps by log TVL, same category first. These are the snapshot’s own priced comps, not a forecast.</p>
-    <table class="mini"><thead><tr><th>Peer</th><th>Category</th><th class="num">TVL</th><th class="num">Listed cap</th><th class="num">Cap / TVL</th><th class="num">LOO fit</th></tr></thead><tbody>${peerRows}</tbody></table>
-    <h3>Snapshot sources</h3>
-    <p class="src">DefiLlama protocols snapshot, fetched 14 Nov 2026, used as the sealed input (no live refetch). Name <b>${r.name}</b>, slug <b>${r.slug}</b>, category <b>${r.category ?? 'uncategorised'}</b>, listed chains <b>${r.chains.join(', ') || 'none'}</b>, protocol-wide TVL <b>${money(r.tvl_usd)}</b>, 7-day change <b>${r.change_7d == null ? 'not recorded' : `${r.change_7d.toFixed(1)}%`}</b>, first listed <b>${r.listed_at ?? 'not dated'}</b>. The snapshot does not split TVL by chain and does not name a vault or deposit asset.</p>
-    <h3>Farm plan under the live scenario</h3>
-    <ol class="timeline">${steps.map((s) => `<li>${s}</li>`).join('')}</ol>
-  `;
-}
-
-function compsHtml() {
-  return R.comps.map((c) => `<tr>
-    <td>${c.name}${c.symbol ? ` (${c.symbol})` : ''}</td>
-    <td>${c.category ?? '—'}</td>
-    <td class="num">${money(c.tvl_usd)}</td>
-    <td class="num">${money(c.mcap_usd)}</td>
-    <td class="num">${c.ratio.toFixed(2)}×</td>
-    <td class="num">${money(c.fitted)}</td>
-    <td class="num">${money(c.loo_fitted)}</td>
-    <td class="num">${c.residual.toFixed(2)}×</td>
-  </tr>`).join('');
-}
-
-function methodHtml() {
-  return `
-    <div class="card" style="margin-bottom:8px">
-      <h3>How to read this radar</h3>
-      <p class="note" style="margin:0">Implied value = (size-curve value if a token launches) × (peer token-record rate) × (existing-token relationship adjustment). Each coefficient is fitted on this snapshot and tested held-out. The default farm rule is stricter than a raw net-versus-T-bill-and-$25/hour screen: net must clear T-bill plus hours × $25, and the printed hourly figure is (net − T-bill) / hours. Peer token-record rates are not launch probabilities, and a FARM label is a modelled scenario, not a recommendation.</p>
+    <p class="kick">${r.category ?? 'Protocol'} · ${r.chain_label} · rank ${r.rank} (${r.rank_lo}–${r.rank_hi}) · snapshot ${R.as_of}</p>
+    <h2>${r.name} <span class="ver lg ${L.verdict}">${L.verdict}</span></h2>
+    <div class="figs">
+      <div><span>Implied value</span><b>${money(r.implied_value_usd)}</b></div>
+      <div><span>Token odds</span><b>${pct(r.token_odds)}</b></div>
+      <div><span>TVL</span><b>${money(r.tvl_usd)}</b></div>
+      <div><span>Net / hour</span><b class="${L.ph >= 0 ? 'pos' : 'neg'}">${L.ph < 0 ? '−' : ''}${usd2(Math.abs(L.ph))}</b></div>
     </div>
-    <div class="extras">${extrasHtml()}</div>
-    ${evidenceHtml()}
-    <div class="card" style="margin-top:8px">
-      <h3>Farm rule and tornado notes</h3>
-      <p class="note">${ev.farm.rule} Default deposit ${usd2(ev.farm.deposit)}, depositor share ${pct(ev.farm.drop_share, 0)}, horizon ${ev.farm.weeks} weeks, wage $${ev.farm.wage}/h, T-bill ${pct(ev.farm.tbill, 0)} annual.</p>
-    </div>`;
+    <h3>Verdict &amp; scenario economics · ${scenarioLabel()}</h3>
+    <table class="eco"><tbody>
+      <tr><td>Modelled depositor drop: ${(state.share * 100).toFixed(1)}% × ${usd2(L.deposit)} / (TVL + deposit) × implied</td><td class="num">${usd2(L.drop)}</td></tr>
+      <tr><td>Fees: gas, bridge, entry and exit</td><td class="num">−${usd2(r.fees_usd)}</td></tr>
+      <tr class="tot"><td>Net of fees</td><td class="num">${usd2(L.net)}</td></tr>
+      <tr><td>T-bill alternative: ${pct(TBILL)} a year for ${state.weeks} weeks</td><td class="num">${usd2(L.tbill)}</td></tr>
+      <tr><td>Hands-on time: ${L.hours} h × $${state.wage}</td><td class="num">${usd2(L.labor)}</td></tr>
+      <tr class="tot"><td>Hurdle to qualify as FARM</td><td class="num">${usd2(L.hurdle)}</td></tr>
+    </tbody></table>
+    <h3>Why this verdict</h3>
+    <p class="why">${whyOf(r, L)}</p>
+    <h3>Valuation breakdown</h3>
+    <ol class="arith">
+      <li>Size curve on protocol-wide TVL ${money(r.tvl_usd)}: exp(${M.a.toFixed(3)} + ${M.b.toFixed(3)} × ln TVL) = <b>${money(vif)}</b> if a token were priced.</li>
+      <li>Token-record odds from years listed (${fmtYears(yearsOf(r))}), ln TVL, name-stem family and 7-day growth (${r.change_7d == null ? 'not recorded' : `${r.change_7d.toFixed(1)}%`}): <b>${pct(od)}</b>.</li>
+      <li>Relationship adjustment <b>×${r.kinship_share}</b>${r.kinship ? `: ${r.kinship} already records a token` : ': no priced parent shares its name stem'}.</li>
+      <li>Implied value = ${money(vif)} × ${pct(od)} × ${r.kinship_share} = <b>${money(r.implied_value_usd)}</b>, matching board.json.</li>
+    </ol>
+    <h3>Comparable priced protocols</h3>
+    <table class="mini"><thead><tr><th>Peer</th><th>Category</th><th class="num">TVL</th><th class="num">Listed cap</th><th class="num">Cap / TVL</th><th class="num">LOO fit</th></tr></thead><tbody>${peers}</tbody></table>
+    <h3>Risks &amp; uncertainty</h3>
+    <ul class="risk">
+      <li>Value range P25–P75 ${money(r.p25)}–${money(r.p75)}, P10–P90 ${money(r.p10)}–${money(r.p90)}; rank could sit anywhere in ${r.rank_lo}–${r.rank_hi}.</li>
+      <li>Walk-forward P10–P90 coverage is ${pct(rh.wf_p10)} against an 80% target (n=${rh.wf_n}): treat the outer band as too narrow.</li>
+      <li>Token odds are the share of comparable peers that already record a token, not the probability that ${r.name} launches one.</li>
+      <li>Drop is modelled on protocol-wide TVL; the snapshot has no per-chain split and names no vault or deposit asset.</li>
+    </ul>
+    <h3>Suggested farming workflow</h3>
+    <ol class="timeline">${stepsOf(r, L).map(([k, s]) => `<li><span class="k">${k}.</span> ${s}</li>`).join('')}</ol>
+    <h3>Source &amp; snapshot</h3>
+    <p class="src">DefiLlama protocols snapshot, fetched ${R.as_of}, used as the sealed input with no live refetch. Slug <b>${r.slug}</b>, category <b>${r.category ?? 'uncategorised'}</b>, chains <b>${r.chains.join(', ') || 'none'}</b>, first listed <b>${r.listed_at ?? 'not dated'}</b>, TVL basis <b>${r.tvl_basis}</b>.</p>`;
 }
-
-function bindStatic() {
-  $('#howto').innerHTML = `<strong>How to read this.</strong> Implied value = (size-curve value if a token launches) × (peer token-record rate) × (existing-token relationship adjustment). Each coefficient is fitted on this snapshot and tested held-out. A term is kept only when it lowers miss on both leave-one-out and walk-forward. The farm verdict uses an additive hurdle: net must beat the T-bill alternative plus hands-on hours × $25. This is a model scenario, not a forecast that a token will launch, and not an airdrop.`;
-  $('#kicker').textContent = 'Pre-token protocols, valued from their own record';
-  $('#meta').textContent = `DefiLlama snapshot: ${R.as_of} · model refitted in this browser · floor ${money(R.floor_usd, 1)}`;
-  $('#kpis').innerHTML = kpiHtml();
-  $('#acct').innerHTML = acctHtml();
-  $('#audit').innerHTML = auditHtml();
-  $('#evidence').innerHTML = evidenceHtml();
-  $('#calib-full').innerHTML = `<div class="card cal">${calibSvg(200)}</div>`;
-  $('#method-body').innerHTML = methodHtml();
-  $('#comps-body').innerHTML = compsHtml();
-  $('#foot').textContent = ev.value.formula + ' ' + ev.farm.rule + ' Drop uses protocol-wide TVL because the snapshot does not split TVL by chain. Select a row for the arithmetic, the nearest priced peers, the snapshot fields, and the plan.';
-  fillSelects();
-}
-
-function renderBoard() {
-  $('#pills').innerHTML = pillsHtml();
-  $('#scenario').innerHTML = scenarioHtml();
-  const rows = filtered();
-  $('#board-body').innerHTML = rows.map(rowHtml).join('');
-  const tvl = rows.reduce((s, x) => s + x.r.tvl_usd, 0);
-  const imp = rows.reduce((s, x) => s + x.r.implied_value_usd, 0);
-  $('#count').textContent = `${rows.length} of ${R.rows.length} rows · ${money(tvl)} TVL · ${money(imp)} implied`;
-  const title = state.verdict ? `${state.verdict} protocols, live scenario` : state.bucket === 'watchlist' ? 'Watchlist' : 'Ranked board';
-  $('#board-title').textContent = title;
-  bindLive();
-}
-
-function bindLive() {
-  $$('#pills .pill').forEach((b) => b.addEventListener('click', () => {
-    const kind = b.dataset.kind, val = b.dataset.val;
-    if (val === '') { state.verdict = ''; state.bucket = ''; }
-    else if (kind === 'verdict') { state.verdict = state.verdict === val ? '' : val; }
-    else { state.bucket = state.bucket === val ? '' : val; }
-    syncHash(); renderBoard();
-  }));
-  const dep = $('#f-deposit');
-  if (dep) dep.addEventListener('change', () => {
-    state.depositMode = dep.value;
-    state.deposit = { '10k': 10000, '3k': 3000, '30k': 30000, tvl: 10000, custom: state.deposit }[dep.value];
-    renderBoard();
-  });
-  const dn = $('#f-dep-n');
-  if (dn) dn.addEventListener('change', () => { state.deposit = Math.max(100, Number(dn.value) || 10000); renderBoard(); });
-  const sh = $('#f-share');
-  if (sh) sh.addEventListener('input', () => { state.share = Number(sh.value) / 100; renderBoard(); });
-  const wk = $('#f-weeks');
-  if (wk) wk.addEventListener('input', () => { state.weeks = Number(wk.value); renderBoard(); });
-}
-
-function showFront() {
-  $('#front').classList.toggle('hidden', state.tab !== 'board' || !!state.open);
-}
-function setTab(tab) {
-  state.tab = tab;
-  $$('.tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
-  $('#view-board').classList.toggle('hidden', tab !== 'board');
-  $('#view-comps').classList.toggle('hidden', tab !== 'comps');
-  $('#view-method').classList.toggle('hidden', tab !== 'method');
-  showFront();
-}
-
 function openDetail(slug) {
   const r = R.rows.find((x) => x.slug === slug);
   if (!r) return;
@@ -529,104 +362,217 @@ function openDetail(slug) {
   const el = $('#detail');
   el.innerHTML = detailHtml(r);
   el.classList.add('open');
+  el.scrollTop = 0;
   $('#scrim').classList.remove('hidden');
   showFront();
-  $('#btn-close').addEventListener('click', closeDetail);
-  $('#scrim').onclick = closeDetail;
+  $('#btn-close').addEventListener('click', () => { closeDetail(); syncHash(); });
+  $('#scrim').onclick = () => { closeDetail(); syncHash(); };
 }
-
 function closeDetail() {
   state.open = null;
   $('#detail').classList.remove('open');
   $('#scrim').classList.add('hidden');
   showFront();
-  if (location.hash.startsWith('#p/') || location.hash.startsWith('#detail/')) {
-    history.replaceState(null, '', '#board');
-  }
 }
 
+/* Method & tests */
+function dec(row) {
+  if (row.decision === 'must not help') return '<span class="drop">control, must not help</span>';
+  if (row.kept) return '<span class="kept">retained</span>';
+  if (row.decision === 'baseline') return '<span class="base">baseline</span>';
+  return '<span class="drop">tested, not retained</span>';
+}
+function calib() {
+  const pts = R.comps.map((c) => ({ x: Math.log(Math.max(c.loo_fitted, 1)), y: Math.log(Math.max(c.mcap_usd, 1)) }));
+  const n = pts.length;
+  const mx = pts.reduce((s, p) => s + p.x, 0) / n, my = pts.reduce((s, p) => s + p.y, 0) / n;
+  const sxy = pts.reduce((s, p) => s + (p.x - mx) * (p.y - my), 0), sxx = pts.reduce((s, p) => s + (p.x - mx) ** 2, 0);
+  const err = pts.map((p) => Math.abs(p.y - p.x)).sort((a, b) => a - b);
+  const mdae = n % 2 ? err[(n - 1) / 2] : (err[n / 2 - 1] + err[n / 2]) / 2;
+  return { pts, n, slope: sxy / sxx, mdae };
+}
+function calibSvg() {
+  const { pts } = calib();
+  const lo = Math.log(1e5), hi = Math.log(5e10);
+  const w = 640, h = 230, L = 58, Rg = w - 10, T = 8, B = h - 26;
+  const X = (v) => L + (clamp(v, lo, hi) - lo) / (hi - lo) * (Rg - L);
+  const Y = (v) => B - (clamp(v, lo, hi) - lo) / (hi - lo) * (B - T);
+  const ticks = [[1e6, '$1M'], [1e7, '$10M'], [1e8, '$100M'], [1e9, '$1B'], [1e10, '$10B']];
+  const grid = ticks.map(([v, l]) => {
+    const x = X(Math.log(v)).toFixed(1), y = Y(Math.log(v)).toFixed(1);
+    return `<line x1="${x}" y1="${T}" x2="${x}" y2="${B}" stroke="#eef0f0"/><line x1="${L}" y1="${y}" x2="${Rg}" y2="${y}" stroke="#eef0f0"/><text x="${x}" y="${B + 12}" text-anchor="middle">${l}</text><text x="${L - 5}" y="${(+y + 3).toFixed(1)}" text-anchor="end">${l}</text>`;
+  }).join('');
+  const dots = pts.map((p) => `<circle cx="${X(p.x).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="2.4" fill="#0f766e" fill-opacity=".7"/>`).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Leave-one-out fitted cap against listed cap, log axes">${grid}
+    <line x1="${X(lo)}" y1="${Y(lo)}" x2="${X(hi)}" y2="${Y(hi)}" stroke="#1c1917" stroke-dasharray="3 3"/>${dots}
+    <text x="${Rg}" y="${h - 2}" text-anchor="end">Leave-one-out fitted cap (log scale) →</text>
+    <text x="10" y="${T + 2}" transform="rotate(-90 10 ${T + 2})" text-anchor="end">Listed cap (log scale) →</text></svg>`;
+}
+function tornadoHtml() {
+  const rows = ev.sensitivity, main = rows[0].farm, arms = rows.slice(1);
+  const maxD = Math.max(...arms.map((s) => Math.abs(s.farm - main)), 1);
+  return arms.map((s) => {
+    const d = s.farm - main, wd = (Math.abs(d) / maxD) * 50, left = d >= 0 ? 50 : 50 - wd;
+    return `<div class="arm"><div class="lab">${s.name}</div><div class="bw"><i class="${d < 0 ? 'neg' : ''}" style="left:${left}%;width:${wd}%"></i></div><div class="num">${s.farm} (${d >= 0 ? '+' : ''}${d})</div></div>`;
+  }).join('');
+}
+function vrowsHtml() { return ev.value.terms.map((x) => `<tr><td>${x.term}</td><td class="num">×${x.loo.toFixed(2)}</td><td class="num">×${x.wf.toFixed(2)}</td><td>${dec(x)}</td></tr>`).join(''); }
+function orowsHtml() { return ev.odds.terms_tried.map((x) => `<tr><td>${x.term}</td><td class="num">${x.kfold.toFixed(3)}</td><td class="num">${x.wf.toFixed(3)}</td><td>${dec(x)}</td></tr>`).join(''); }
+function covHtml() {
+  const rh = ev.value.range_honesty;
+  return [
+    ['Leave-one-out', 'P25–P75', rh.loo_p25, 0.5, rh.n], ['Leave-one-out', 'P10–P90', rh.loo_p10, 0.8, rh.n],
+    ['Walk-forward', 'P25–P75', rh.wf_p25, 0.5, rh.wf_n], ['Walk-forward', 'P10–P90', rh.wf_p10, 0.8, rh.wf_n],
+  ].map(([test, band, a, tg, n]) => `<tr><td>${test}</td><td>${band}</td><td class="num${a < tg - 0.05 ? ' under' : ''}">${pct(a)}</td><td class="num">${pct(tg)}</td><td class="num">${n}</td></tr>`).join('');
+}
+function evidenceHtml() {
+  const rh = ev.value.range_honesty, br = ev.odds.brier, ac = ev.odds.accuracy;
+  return `
+    <div><h3>Valuation · features retained after out-of-sample testing</h3>
+      <table class="mini"><thead><tr><th>Term, ${ev.comps} priced comps</th><th class="num">Leave-one-out</th><th class="num">Walk-forward</th><th>Decision</th></tr></thead><tbody>${vrowsHtml()}</tbody></table></div>
+    <div><h3>Token odds · Brier score, lower is better</h3>
+      <table class="mini"><thead><tr><th>Term, ${ev.peers} peers</th><th class="num">Ten-fold</th><th class="num">Walk-forward</th><th>Decision</th></tr></thead><tbody>${orowsHtml()}</tbody></table>
+      <p class="note">Secondary, called right at 0.5: walk-forward ${pct(ac.model_wf, 1)} vs ${pct(ac.base_wf, 1)} base rate (n=${ac.n_wf}); ten-fold ${pct(ac.model_10f, 1)} vs ${pct(ac.base_10f, 1)} (n=${ac.n_10f}).</p></div>
+    <div><h3>Prediction interval coverage</h3>
+      <table class="mini"><thead><tr><th>Test</th><th>Interval</th><th class="num">Actual</th><th class="num">Target</th><th class="num">n</th></tr></thead><tbody>${covHtml()}</tbody></table>
+      <p class="note"><span class="under">Walk-forward P10–P90 undercovers its 80% target (${pct(rh.wf_p10)}, n=${rh.wf_n}).</span> ${rh.n_boot.toLocaleString('en-US')} bootstrap resamples of the size curve, each paired with a leave-one-out residual; bands not widened.</p></div>`;
+}
+function methodHtml() {
+  const t = ev.value.typ_miss, rh = ev.value.range_honesty, br = ev.odds.brier, ac = ev.odds.accuracy;
+  const cb = calib();
+  const add = counts('additive'), raw = counts('raw');
+  const ig = integrity();
+  const vrows = vrowsHtml(), orows = orowsHtml(), cov = covHtml();
+  const total = Object.values(R.ledger).reduce((s, n) => s + n, 0);
+  const ledger = Object.entries(R.ledger).filter(([, n]) => n > 0).map(([k, n]) => `<tr><td>${LEDGER_NAMES[k] ?? k}</td><td class="num">${n}</td></tr>`).join('');
+  return `
+    <section class="msec"><h2>How to read this radar</h2><div class="prose">
+      <p>Implied value estimates what a protocol could be worth if it launches a token: estimated size-based value × token-record odds × existing-token relationship adjustment. FARM, THIN and SKIP are scenario-based farming verdicts. FARM must clear the T-bill alternative, fees and a $${state.wage}/hour labor hurdle. Estimates are not launch predictions or airdrop guarantees.</p>
+      <p>Model evidence. Value estimation: ×${t.size_wf.toFixed(2)} walk-forward typical miss vs ×${t.flat_wf.toFixed(2)} flat baseline. Token odds: ${br.model_wf.toFixed(3)} walk-forward Brier vs ${br.base_wf.toFixed(3)} baseline (lower is better). Interval coverage: ${pct(rh.wf_p10)} walk-forward vs 80% stated P10–P90 (n=${rh.wf_n}). Feature selection: only terms improving both held-out tests are retained; rejected terms stay listed below.</p></div></section>
+    <div class="mgrid">
+      <section class="msec"><h2>Valuation · features retained after out-of-sample testing</h2>
+        <p class="note">Typical multiplicative miss on ${ev.comps} priced comps. A term is retained only if leave-one-out and walk-forward miss both fall (walk-forward: ${ev.value.wf_split.train} comps listed before ${ev.value.wf_split.cut} price ${ev.value.wf_split.test} later ones).</p>
+        <table class="mini"><thead><tr><th>Term, added in order</th><th class="num">Leave-one-out</th><th class="num">Walk-forward</th><th>Decision</th></tr></thead><tbody>${vrows}</tbody></table></section>
+      <section class="msec"><h2>Token odds · Brier score, ${ev.peers} peers (${ev.peers_with_token} with a token)</h2>
+        <p class="note">Brier is the primary test, lower is better: walk-forward ${br.model_wf.toFixed(3)} vs ${br.base_wf.toFixed(3)} base rate on ${ac.n_wf} later peers; ten-fold ${br.model_10f.toFixed(3)} vs ${br.base.toFixed(3)} on ${ac.n_10f}. Secondary, called right at 0.5: walk-forward ${pct(ac.model_wf, 1)} vs ${pct(ac.base_wf, 1)} for the base-rate classifier; ten-fold ${pct(ac.model_10f, 1)} vs ${pct(ac.base_10f, 1)}.</p>
+        <table class="mini"><thead><tr><th>Term, added in order</th><th class="num">Ten-fold</th><th class="num">Walk-forward</th><th>Decision</th></tr></thead><tbody>${orows}</tbody></table></section>
+      <section class="msec"><h2>Prediction interval coverage</h2>
+        <p class="note">Share of held-out listed caps inside the printed interval. Prediction intervals are evaluated using ${rh.n_boot.toLocaleString('en-US')} bootstrap resamples of the size curve, each paired with a leave-one-out residual; the bands are not widened to hit the label. <span class="under">The walk-forward P10–P90 band undercovers its 80% target (${pct(rh.wf_p10)}, n=${rh.wf_n}).</span> Within ×3 of the model: ${pct(rh.loo_within_x3)} leave-one-out, ${pct(rh.wf_within_x3)} walk-forward.</p>
+        <table class="mini"><thead><tr><th>Test</th><th>Interval</th><th class="num">Actual</th><th class="num">Target</th><th class="num">n</th></tr></thead><tbody>${cov}</tbody></table></section>
+      <section class="msec cal"><h2>Calibration · leave-one-out, n=${cb.n} priced comps</h2>
+        <p class="note">Each point is a comp held out of the size-curve fit; dashed line is one-to-one, both axes log scale. Calibration slope ${cb.slope.toFixed(2)} (1.00 is ideal); median absolute log error ${cb.mdae.toFixed(2)} (×${Math.exp(cb.mdae).toFixed(2)}). A tidy scatter alone does not prove calibration.</p>
+        ${calibSvg()}</section>
+      <section class="msec"><h2>Scenario sensitivity · FARM count vs ${ev.sensitivity[0].farm} in the main scenario</h2>
+        <p class="note">One assumption moves at a time. This is scenario sensitivity, not model uncertainty: deposit size and horizon change the economics, not the chance of a token.</p>
+        ${tornadoHtml()}</section>
+      <section class="msec"><h2>How FARM is determined</h2>
+        <p class="note">${ev.farm.rule} Default deposit ${usd2(ev.farm.deposit)}, drop share ${pct(ev.farm.drop_share)}, horizon ${ev.farm.weeks} weeks, wage $${ev.farm.wage}/h, T-bill ${pct(ev.farm.tbill)} a year.</p>
+        <table class="mini"><thead><tr><th>Hurdle under ${scenarioLabel()}</th><th class="num">FARM</th><th class="num">THIN</th><th class="num">SKIP</th></tr></thead><tbody>
+          <tr><td>Additive (default): net &gt; T-bill + hours × $${state.wage}</td><td class="num">${add.FARM}</td><td class="num">${add.THIN}</td><td class="num">${add.SKIP}</td></tr>
+          <tr><td>Raw-net screen, sensitivity only: net &gt; T-bill and net / hour &gt; $${state.wage}</td><td class="num">${raw.FARM}</td><td class="num">${raw.THIN}</td><td class="num">${raw.SKIP}</td></tr></tbody></table>
+        <p class="note" style="margin-top:6px">Both rows use the same ${R.rows.length} records, costs and assumptions. The raw-net row is a sensitivity analysis computed here, not another entry's result.</p></section>
+      <section class="msec"><h2>Integrity audit · ${ig.ok} of ${ig.bits.length} checks pass</h2>
+        <div class="audit" id="audit">${ig.bits.map(([s, ok]) => `<span class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✕'} ${s}</span>`).join('')}</div></section>
+      <section class="msec"><h2>Full snapshot classification · ${total} protocols</h2>
+        <table class="mini"><tbody>${ledger}</tbody></table></section>
+    </div>`;
+}
+function compsHtml() {
+  return R.comps.map((c) => `<tr><td>${c.name}${c.symbol ? ` (${c.symbol})` : ''}</td><td>${c.category ?? '—'}</td><td class="num">${money(c.tvl_usd)}</td><td class="num">${money(c.mcap_usd)}</td><td class="num">${c.ratio.toFixed(3)}×</td><td class="num">${money(c.fitted)}</td><td class="num">${money(c.loo_fitted)}</td><td class="num">${c.residual.toFixed(2)}×</td></tr>`).join('');
+}
+
+/* Wiring */
+function bindStatic() {
+  const ig = integrity();
+  $('#meta').textContent = `DefiLlama snapshot · ${R.as_of} · model refitted in this browser`;
+  const st = $('#status');
+  st.textContent = `${ig.ok === ig.bits.length ? '✓' : '✕'} Integrity ${ig.ok}/${ig.bits.length} · checksum ${ig.checksum}`;
+  st.classList.toggle('bad', ig.ok !== ig.bits.length);
+  $('#formula').textContent = 'Implied value = Size curve × Token odds × Relationship adjustment';
+  $('#methline').innerHTML = methlineHtml();
+  $('#acct').innerHTML = acctHtml();
+  $('#evidence').innerHTML = evidenceHtml();
+  $('#comps-intro').textContent = `These ${ev.comps} protocols already record a priced token and are not on the house set-aside list. They are the size-curve sample and are never ranked on the board.`;
+  $('#comps-body').innerHTML = compsHtml();
+  $('#method-body').innerHTML = methodHtml();
+  $('#foot').textContent = `${ev.value.formula} ${ev.farm.rule} Select a row for the economics, the valuation breakdown, priced peers, risks and the costed, timed workflow.`;
+  fillSelects();
+}
+function showFront() { $('#front').classList.toggle('hidden', state.tab !== 'board' || !!state.open); }
+function setTab(tab) {
+  state.tab = tab;
+  $$('.tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+  for (const v of ['board', 'comps', 'method']) $(`#view-${v}`).classList.toggle('hidden', tab !== v);
+  showFront();
+}
 function syncHash() {
-  if (state.open) { history.replaceState(null, '', `#p/${state.open}`); return; }
-  if (state.tab === 'comps') { history.replaceState(null, '', '#comps'); return; }
-  if (state.tab === 'method') { history.replaceState(null, '', '#method'); return; }
-  if (state.verdict === 'FARM' && !state.bucket) { history.replaceState(null, '', '#filter/farm'); return; }
-  if (state.bucket === 'watchlist' && !state.verdict) { history.replaceState(null, '', '#filter/watch'); return; }
-  history.replaceState(null, '', '#board');
+  const h = state.open ? `#p/${state.open}` : state.tab !== 'board' ? `#${state.tab}` : state.verdict === 'FARM' ? '#filter/farm' : '#board';
+  history.replaceState(null, '', h);
 }
-
 function applyHash() {
   const h = decodeURIComponent((location.hash || '#board').slice(1));
-  if (h.startsWith('p/') || h.startsWith('detail/')) {
-    setTab('board');
-    openDetail(h.split('/')[1]);
-    return;
-  }
+  if (h.startsWith('p/')) { setTab('board'); renderBoard(); openDetail(h.split('/')[1]); return; }
   closeDetail();
-  if (h === 'comps') { setTab('comps'); return; }
-  if (h === 'method') { setTab('method'); return; }
-  if (h === 'filter/farm') { state.verdict = 'FARM'; state.bucket = ''; setTab('board'); renderBoard(); return; }
-  if (h === 'filter/watch') { state.bucket = 'watchlist'; state.verdict = ''; setTab('board'); renderBoard(); return; }
+  if (h === 'comps' || h === 'method') { setTab(h); return; }
+  if (h === 'filter/farm') { state.verdict = 'FARM'; state.bucket = ''; state.sort = 'net_per_hour'; state.dir = -1; }
+  if (h === 'filter/watch') { state.bucket = 'watchlist'; state.verdict = ''; }
   setTab('board');
+  renderBoard();
 }
-
 function exportRows(kind) {
   const rows = filtered().map(({ r, L }) => ({
     rank: r.rank, slug: r.slug, name: r.name, category: r.category, chains: r.chains.join('|'),
-    tvl_usd: r.tvl_usd, token_odds: r.token_odds, value_if_launches: r.value_if_launches,
-    implied_value_usd: r.implied_value_usd, p25: r.p25, p75: r.p75,
-    deposit_usd: L.deposit, drop_share: state.share, horizon_weeks: state.weeks,
-    drop_usd: round(L.drop, 2), net_usd: round(L.net, 2), net_per_hour: round(L.adj, 2),
-    hours: L.hours, verdict: L.verdict,
+    tvl_usd: r.tvl_usd, change_7d: r.change_7d, years_listed: r.years_listed, token_odds: r.token_odds,
+    value_if_launches: r.value_if_launches, implied_value_usd: r.implied_value_usd, p25: r.p25, p75: r.p75,
+    deposit_usd: L.deposit, drop_share: state.share, horizon_weeks: state.weeks, hurdle: state.hurdle,
+    drop_usd: round(L.drop, 2), net_usd: round(L.net, 2), net_per_hour: round(L.ph, 2), hours: L.hours, verdict: L.verdict,
   }));
-  const blob = kind === 'csv'
-    ? new Blob([csvOf(rows)], { type: 'text/csv' })
-    : new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json' });
+  const keys = Object.keys(rows[0] || {});
+  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const body = kind === 'csv' ? [keys.join(','), ...rows.map((x) => keys.map((k) => esc(x[k])).join(','))].join('\n') : JSON.stringify(rows, null, 2);
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `prelaunch-radar-${kind === 'csv' ? 'board.csv' : 'board.json'}`;
+  a.href = URL.createObjectURL(new Blob([body], { type: kind === 'csv' ? 'text/csv' : 'application/json' }));
+  a.download = `prelaunch-radar-board.${kind}`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
-function csvOf(rows) {
-  const keys = Object.keys(rows[0] || {});
-  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  return [keys.join(','), ...rows.map((r) => keys.map((k) => esc(r[k])).join(','))].join('\n');
-}
-
 function ready() {
   if (!R || !R.rows) return;
   bindStatic();
-  $('#f-search').addEventListener('input', () => { state.search = $('#f-search').value; renderBoard(); });
-  $('#f-cat').addEventListener('change', () => { state.cat = $('#f-cat').value; renderBoard(); });
-  $('#f-chain').addEventListener('change', () => { state.chain = $('#f-chain').value; renderBoard(); });
+  $('#f-search').addEventListener('input', (e) => { state.search = e.target.value; renderBoard(); });
+  $('#f-cat').addEventListener('change', (e) => { state.cat = e.target.value; renderBoard(); });
+  $('#f-chain').addEventListener('change', (e) => { state.chain = e.target.value; renderBoard(); });
   document.addEventListener('click', (e) => {
-    const preset = e.target.closest('[data-preset]');
-    if (preset) {
-      if (preset.dataset.preset === 'reset') {
-        state.search = ''; state.cat = ''; state.chain = ''; state.bucket = ''; state.verdict = '';
-        state.depositMode = '10k'; state.deposit = S0.deposit; state.share = S0.drop_share; state.weeks = S0.weeks;
-        $('#f-search').value = ''; $('#f-cat').value = ''; $('#f-chain').value = '';
-      }
-      renderBoard(); syncHash();
+    const pill = e.target.closest('#pills .pill');
+    if (pill) {
+      const { kind, val } = pill.dataset;
+      if (val === '') { state.verdict = ''; state.bucket = ''; }
+      else if (kind === 'verdict') state.verdict = state.verdict === val ? '' : val;
+      else state.bucket = state.bucket === val ? '' : val;
+      renderBoard(); syncHash(); return;
+    }
+    const hb = e.target.closest('[data-hurdle]');
+    if (hb) { state.hurdle = hb.dataset.hurdle; renderBoard(); $('#method-body').innerHTML = methodHtml(); return; }
+    if (e.target.closest('[data-preset="reset"]')) {
+      Object.assign(state, { search: '', cat: '', chain: '', bucket: '', verdict: '', depositMode: '10k', deposit: S0.deposit, share: S0.drop_share, weeks: S0.weeks, hurdle: 'additive', sort: 'rank', dir: 1 });
+      $('#f-search').value = ''; $('#f-cat').value = ''; $('#f-chain').value = '';
+      renderBoard(); syncHash(); return;
     }
     if (e.target.id === 'btn-csv') exportRows('csv');
     if (e.target.id === 'btn-json') exportRows('json');
     const th = e.target.closest('.grid thead th[data-sort]');
     if (th) {
       const k = th.dataset.sort;
-      if (state.sort === k) state.dir *= -1;
-      else { state.sort = k; state.dir = k === 'rank' ? 1 : -1; }
+      if (state.sort === k) state.dir *= -1; else { state.sort = k; state.dir = k === 'rank' || k === 'name' || k === 'verdict' ? 1 : -1; }
       renderBoard();
     }
     const tr = e.target.closest('#board-body tr[data-slug]');
     if (tr) { openDetail(tr.dataset.slug); syncHash(); }
-    const tab = e.target.closest('.tab');
-    if (tab) { closeDetail(); setTab(tab.dataset.tab); syncHash(); }
+    const tab = e.target.closest('.tab, [data-goto]');
+    if (tab) { closeDetail(); setTab(tab.dataset.tab || tab.dataset.goto); if (state.tab === 'method') $('#method-body').innerHTML = methodHtml(); syncHash(); window.scrollTo(0, 0); }
   });
   window.addEventListener('hashchange', applyHash);
-  renderBoard();
   applyHash();
 }
 
 ready();
-
