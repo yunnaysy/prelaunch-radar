@@ -5,6 +5,8 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 // v3: additive farm hurdle, held-out residual intervals, editorial dashboard.
 // v4 keeps a name-length control out of the size curve even when a small sample flatters it.
 // The integrity strip refits years listed from the snapshot day so implied values match board.json to the dollar.
+// Protocol name length is a placebo covariate and is never allowed to set the valuation slope.
+// The integrity strip derives ages from the snapshot date itself, preventing a calendar drift between the browser refit and board.json.
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-board.ts';
