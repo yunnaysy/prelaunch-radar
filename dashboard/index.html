@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prelaunch Radar</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div>
+          <h1>Prelaunch Radar</h1>
+          <p class="tagline">Protocols with value on-chain, before a token exists</p>
+        </div>
+      </div>
+      <div class="header-stats">
+        <div class="hstat"><strong id="h-date">—</strong><span>snapshot date</span></div>
+        <div class="hstat"><strong id="h-pre">—</strong><span>pre-token tracked</span></div>
+        <div class="hstat"><strong id="h-watch">—</strong><span>watchlist covered</span></div>
+        <div class="hstat"><strong id="h-launch">—</strong><span>launched, shown separately</span></div>
+      </div>
+    </header>
+
+    <section class="cards" id="cards"></section>
+
+    <nav class="tabs" aria-label="Views">
+      <button class="tab active" data-tab="board" type="button">Ranked board</button>
+      <button class="tab" data-tab="trading" type="button">Already trading</button>
+      <button class="tab" data-tab="method" type="button">How the value is derived</button>
+    </nav>
+
+    <section id="view-board" class="view">
+      <div class="filters" id="filters">
+        <div class="filter-grid">
+          <label class="field search-field">
+            <span>Search protocol</span>
+            <input id="f-search" type="search" placeholder="name, category or chain" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Category</span>
+            <select id="f-category"><option value="">All categories</option></select>
+          </label>
+          <label class="field">
+            <span>Chain</span>
+            <select id="f-chain"><option value="">All chains</option></select>
+          </label>
+          <label class="field slider-field">
+            <span>Minimum TVL <b id="f-tvl-label">$0</b></span>
+            <input id="f-tvl" type="range" min="0" max="1000" value="0" step="10">
+          </label>
+          <label class="toggle">
+            <input id="f-watchlist" type="checkbox">
+            <span>Watchlist only</span>
+          </label>
+          <label class="toggle">
+            <input id="f-growth" type="checkbox">
+            <span>7d growth &gt; 0</span>
+          </label>
+        </div>
+        <div class="preset-row">
+          <span class="preset-label">Quick filters</span>
+          <button class="preset" data-preset="watchlist-growth" type="button">Watchlist + growth</button>
+          <button class="preset" data-preset="large-tvl" type="button">Large TVL</button>
+          <button class="preset" data-preset="multi-chain" type="button">Multi-chain</button>
+          <button class="preset" data-preset="all" type="button">Reset</button>
+          <span class="active-note hidden" id="active-note"></span>
+          <span class="result-count" id="result-count"></span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="board-table">
+          <thead>
+            <tr>
+              <th data-sort="rank">#</th>
+              <th data-sort="name">Protocol</th>
+              <th data-sort="category">Category</th>
+              <th data-sort="chains">Chains</th>
+              <th data-sort="tvl_usd">TVL</th>
+              <th data-sort="change_7d">7d</th>
+              <th data-sort="months_without_token">Tokenless</th>
+              <th data-sort="implied_value_usd">Implied value</th>
+              <th data-sort="on_watchlist">Watch</th>
+            </tr>
+          </thead>
+          <tbody id="board-body"></tbody>
+        </table>
+      </div>
+      <p class="table-footnote">Ranked by implied value, a model estimate from snapshot figures — not a forecast, not a promise of a token or an airdrop. Select any row for the full arithmetic and farm plan.</p>
+    </section>
+
+    <section id="view-trading" class="view hidden">
+      <div class="section-intro">
+        <h2>Already trading</h2>
+        <p>These protocols record a priced token in the same snapshot. They are shown separately: the radar's board is only for protocols that record no token. Market cap divided by TVL is the raw ratio this page uses to calibrate value for the board.</p>
+      </div>
+      <div class="table-wrap">
+        <table class="board-table trading-table">
+          <thead>
+            <tr>
+              <th data-sort="rank">#</th>
+              <th data-sort="name">Protocol</th>
+              <th data-sort="symbol">Ticker</th>
+              <th data-sort="category">Category</th>
+              <th data-sort="tvl_usd">TVL</th>
+              <th data-sort="mcap_usd">Market cap</th>
+              <th data-sort="mcap_tvl_ratio">Mcap / TVL</th>
+              <th data-sort="change_7d">7d</th>
+            </tr>
+          </thead>
+          <tbody id="trading-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-method" class="view hidden">
+      <div class="section-intro">
+        <h2>How the value is derived</h2>
+        <p>Every number comes from the sealed DefiLlama snapshot. No external prices, no hand-picked names, no airdrop claims. The model calibrates itself on protocols in that same snapshot that do record a priced token.</p>
+      </div>
+      <div class="method-grid">
+        <article class="panel formula-panel">
+          <h3>The formula</h3>
+          <pre id="method-formula"></pre>
+          <div class="factor-list" id="method-constants"></div>
+        </article>
+        <article class="panel">
+          <h3>What each factor means</h3>
+          <ol class="explain">
+            <li><b>TVL</b> is the protocol's own tracked total value locked. It is the base, never a guess about a future token.</li>
+            <li><b>Category ratio</b> is the median market cap / TVL of protocols in the same category that record a priced token. With fewer than five peers the all-protocol median is used. Ratios are clamped to a sane band.</li>
+            <li><b>Growth factor</b> rewards recent TVL inflows and discounts outflows: 1 + clamp(7d change / 100, −0.30, +0.30).</li>
+            <li><b>Age factor</b> is higher for protocols tracked only recently, because a long tokenless runway tends to mean less upside left before a possible launch: clamp(1.2 − months / 60, 0.7, 1.2).</li>
+            <li><b>Chain factor</b> gives a small, capped lift for breadth: 1 + 0.015 × min(chains, 8).</li>
+            <li>The product is rounded to whole dollars with a $1 floor. The detail view shows these six steps for every row.</li>
+          </ol>
+        </article>
+      </div>
+      <article class="panel">
+        <h3>Calibration by category</h3>
+        <p class="muted">Sample counts are token-trading protocols in this snapshot. An asterisk marks categories that fall back to the all-protocol median.</p>
+        <div class="table-wrap method-table-wrap">
+          <table class="board-table method-table">
+            <thead><tr><th>Category</th><th>Median mcap / TVL</th><th>Sample</th><th>Basis</th></tr></thead>
+            <tbody id="method-body"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+  </div>
+
+  <div class="scrim hidden" id="scrim"></div>
+  <aside class="detail" id="detail" aria-label="Protocol detail"></aside>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
